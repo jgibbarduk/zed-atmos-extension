@@ -1,6 +1,7 @@
 package index
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,10 +71,12 @@ func (idx *Index) StartWatching(onChange func()) error {
 					return
 				}
 				if strings.HasSuffix(event.Name, ".yaml") || strings.HasSuffix(event.Name, ".yml") {
+					if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+						idx.ReindexFile(event.Name)
+					}
 					debounce.Reset(200 * time.Millisecond)
 				}
 			case <-debounce.C:
-				idx.Reindex()
 				if idx.onChange != nil {
 					idx.onChange()
 				}
@@ -101,21 +104,36 @@ func (idx *Index) Reindex() {
 	if idx.BasePath == "" {
 		return
 	}
-	entries, err := os.ReadDir(idx.BasePath)
-	if err != nil {
-		return
-	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".yaml") && !strings.HasSuffix(e.Name(), ".yml") {
-			continue
+
+	idx.Files = make(map[string]*StackFile)
+	idx.ByImport = make(map[string][]string)
+
+	filepath.Walk(idx.BasePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
 		}
-		fullPath := filepath.Join(idx.BasePath, e.Name())
-		if _, exists := idx.Files[fullPath]; !exists {
-			idx.Files[fullPath] = &StackFile{Path: fullPath}
+		if info.IsDir() {
+			return nil
 		}
-	}
+		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
+			return nil
+		}
+
+		sf, parseErr := parseYAMLFile(path)
+		if parseErr != nil {
+			log.Printf("parse %s: %v", path, parseErr)
+		}
+		if sf == nil {
+			sf = &StackFile{Path: path}
+		}
+		idx.Files[path] = sf
+		for _, imp := range sf.Imports {
+			idx.ByImport[imp.RawPath] = append(idx.ByImport[imp.RawPath], path)
+		}
+		return nil
+	})
 }
 
 func (idx *Index) GetFile(path string) *StackFile {
@@ -138,6 +156,67 @@ func (idx *Index) FindComponent(name string) []StackFile {
 		}
 	}
 	return results
+}
+
+func (idx *Index) ResolveImport(rawPath string, fromDir string) []string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	candidates := []string{
+		filepath.Join(idx.BasePath, rawPath+".yaml"),
+		filepath.Join(idx.BasePath, rawPath+".yml"),
+		filepath.Join(fromDir, rawPath+".yaml"),
+		filepath.Join(fromDir, rawPath+".yml"),
+	}
+
+	var resolved []string
+	for _, c := range candidates {
+		if _, ok := idx.Files[c]; ok {
+			resolved = append(resolved, c)
+		}
+	}
+	return resolved
+}
+
+func (idx *Index) FindImporters(rawPath string) []string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.ByImport[rawPath]
+}
+
+func (idx *Index) ReindexFile(path string) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	oldFile, existed := idx.Files[path]
+
+	sf, err := parseYAMLFile(path)
+	if err != nil {
+		log.Printf("parse %s: %v", path, err)
+	}
+	if sf == nil {
+		sf = &StackFile{Path: path}
+	}
+
+	if existed && oldFile != nil {
+		for _, old := range oldFile.Imports {
+			oldImporters := idx.ByImport[old.RawPath]
+			for i, p := range oldImporters {
+				if p == path {
+					idx.ByImport[old.RawPath] = append(oldImporters[:i], oldImporters[i+1:]...)
+					break
+				}
+			}
+			if len(idx.ByImport[old.RawPath]) == 0 {
+				delete(idx.ByImport, old.RawPath)
+			}
+		}
+	}
+
+	idx.Files[path] = sf
+	for _, imp := range sf.Imports {
+		idx.ByImport[imp.RawPath] = append(idx.ByImport[imp.RawPath], path)
+	}
 }
 
 func (idx *Index) SetBasePath(path string) {
