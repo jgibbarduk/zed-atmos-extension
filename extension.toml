@@ -8,8 +8,12 @@ repository = "https://github.com/jamesgibbard/zed-atmos-language"
 
 [grammars.yaml]
 repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"
-rev = "0.7.0"
+commit = "b733d3f5f5005890f324333dd57e1f0badec5c87"
+
+languages = ["languages/atmos"]
 
 [language_servers.atmos-lsp-bridge]
 name = "Atmos LSP Bridge"
 languages = ["Atmos"]
+
+capabilities = ["process_execution"]
