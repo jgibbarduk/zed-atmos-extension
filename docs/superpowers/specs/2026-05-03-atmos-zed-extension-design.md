@@ -1,162 +1,179 @@
-# Atmos Language Extension for Zed — Design Spec
+# Atmos Language Extension for Zed — Design Spec v2
 
 **Date:** 2026-05-03
-**Status:** Draft
+**Status:** Finalized (post-architect-review)
 
 ## Overview
 
-A Zed IDE language extension for [Atmos](https://atmos.tools) that provides syntax highlighting, code outline, and advanced navigation across Atmos's hierarchical stack configuration model (imports, inheritance, deep merges).
+A Zed IDE language extension for [Atmos](https://atmos.tools) providing syntax highlighting, code outline, advanced navigation (imports, inheritance, deep merges), best-practice diagnostics, and LSP proxying to `atmos lsp start`.
 
 ## Architecture
 
 ```
 zed-atmos-language/
-├── extension.toml              # Zed extension metadata
-├── Cargo.toml                  # Rust WASM — thin LSP launcher only
-├── src/
-│   └── lib.rs                  # Downloads & launches the Go LSP binary
-├── languages/
-│   └── atmos/
-│       ├── config.toml         # Language config (reuses tree-sitter-yaml)
-│       ├── highlights.scm      # Atmos-aware syntax highlighting
-│       ├── outline.scm         # Stack/component structure outline
-│       ├── indents.scm         # Indentation rules
-│       └── brackets.scm        # Bracket matching
-└── lsp/
-    ├── go.mod
-    ├── main.go                 # LSP server entry point
-    └── internal/
-        ├── handler/            # LSP protocol handlers
-        ├── parser/             # YAML parsing & import resolution
-        ├── resolver/           # Import chain & inheritance graph
-        └── index/              # File watcher → cross-reference index
+├── extension.toml                 # Zed extension manifest
+├── Cargo.toml                     # Rust WASM — thin LSP launcher
+├── src/lib.rs                     # Discovers & launches the Go LSP bridge binary
+├── languages/atmos/
+│   ├── config.toml                # Language detection (first_line_pattern + path_suffixes)
+│   ├── highlights.scm             # Syntax highlighting queries
+│   ├── outline.scm                # Structure outline
+│   ├── indents.scm                # Indentation rules
+│   └── brackets.scm               # Bracket matching
+├── lsp-bridge/                    # Go LSP proxy binary
+│   ├── main.go                    # Entry point
+│   └── internal/
+│       ├── proxy/                 # LSP stdio transport + forward-to-atmos loop
+│       ├── handler/               # LSP method interception (definition, references, hover, etc.)
+│       ├── index/                 # YAML parsing, file index, cross-reference maps
+│       ├── navigation/            # Import resolution, inheritance tracking
+│       ├── diagnostics/           # Best-practice checks
+│       └── lsp/                   # LSP protocol types + error responses
+└── icons/
+    └── file.svg                   # Atmos logo for file icon theme
 ```
 
 ### Components
 
 | Component | Language | Role |
 |---|---|---|
-| Zed extension shim | Rust → WASM | Downloads Go LSP binary from GitHub Releases, spawns it as a child process |
+| Zed extension shim | Rust → WASM | Discovers Go LSP bridge binary, spawns it |
 | Tree-sitter queries | Scheme (.scm) | Syntax highlighting, outline, brackets, indentation |
-| Go LSP server | Go | Full language intelligence: import resolution, inheritance tracking, cross-references |
+| Go LSP bridge | Go | Proxy: intercepts navigation/diagnostics methods, forwards rest to `atmos lsp start` |
 | Language config | TOML | File association, comment syntax, grammar binding |
 
-## File Association
+## Workstream A: LSP Proxy Fixes (Critical Correctness)
 
-Atmos files are YAML files. We use two cooperative strategies to distinguish them from plain YAML:
+### A1: Forward `initialize` downstream
 
-1. **`atmos.yaml` proximity:** Files under `stacks.base_path` (relative to discovered `atmos.yaml`) are Atmos stack files.
-2. **First-line/content pattern:** Root-level `import:`, `components:`, or `vars:` keys signal an Atmos stack file.
+**Problem:** `handleInitialize` intercepts `initialize` and returns bridge-only capabilities. The downstream `atmos lsp start` process never receives the handshake, so all forwarded requests (completions, formatting, etc.) silently fail.
 
-The language `config.toml` uses `path_suffixes = ["yaml", "yml"]` with `first_line_pattern` matching these keys.
+**Fix:** Forward `initialize` to `atmos lsp start` first, capture its capabilities response, merge the bridge's additional capabilities on top, return the merged result. This is the standard LSP proxy pattern.
 
-## Syntax Highlighting
+**Key implementation detail:** The proxy loop currently sends messages via `sendLoop()` goroutine. We need a synchronous request/response mechanism for the downstream process so `initialize` can wait for `atmos` to respond before returning. Add a `callDownstream(method, params)` function that sends a request, reads the matching response, and returns it.
 
-Reuses `tree-sitter-yaml` grammar. Custom `highlights.scm` adds Atmos-specific captures:
+### A2: Activate file watcher
 
-| Capture | Target |
-|---|---|
-| `@keyword` | `import`, `vars`, `settings`, `env`, `components`, `metadata`, `terraform`, `helmfile`, `provider`, `backend`, `overrides` |
-| `@string.special` | Values under `import:` keys (file paths and glob patterns) |
-| `@function` | Component names under `components.terraform.*` and `components.helmfile.*` |
-| `@type` | `metadata.component` value (underlying Terraform module reference) |
-| `@keyword` | `metadata.inherits` key |
-| `@label` | Go template expressions (`{{ .vars.region }}`) |
+**Problem:** `Index.StartWatching()` exists with fsnotify + debounced re-index but is never called.
 
-## Outline Panel
+**Fix:** Call `idx.StartWatching(onChange)` from `handleInitialized` after the base path is set. The `onChange` callback should publish `textDocument/publishDiagnostics` notifications for all open files so diagnostics stay fresh.
 
-Displays a hierarchical tree of stacks and their components:
+### A3: Handle `textDocument/didSave`
+
+**Problem:** Handler intercepts `didOpen`/`didChange` but not `didSave`. After saving, neither diagnostics refresh nor the index updates.
+
+**Fix:** Add `textDocument/didSave` to the handler dispatch. On save: re-parse the saved file, update the index maps for that file, and re-run diagnostics for all open files that import it.
+
+### A4: Propagate `shutdown`/`exit`
+
+**Problem:** Handler intercepts `shutdown` and just sets `h.initialized = false`. The downstream `atmos lsp` process never receives shutdown/exit.
+
+**Fix:** Forward `shutdown` to the downstream process. Wait for the response (or timeout). Send `exit` notification. Kill the process if it doesn't exit within a grace period.
+
+### A5: Improved hover content
+
+**Problem:** Hover only shows `Import: <rawPath>` or `Component: <name>`.
+
+**Fix:** For imports, show the resolved file path(s) along with file-existence status. For components, show the type (terraform/helmfile), and list the inheritance chain (which other stacks define or override this component).
+
+## Workstream B: Extension Manifest
+
+### B1: Add `languages` field
+
+`extension.toml` is missing `languages = ["languages/atmos"]` — without this, Zed doesn't know where to find the language config.
+
+### B2: Add `capabilities` declaration
+
+Declare `capabilities = ["process_execution"]` since the extension spawns the LSP bridge binary.
+
+### B3: Verify grammar config
+
+Verify grammar uses `commit` with full SHA (not `rev` with tag) since Zed shallow-clones and tags don't resolve.
+
+## Workstream C: Syntax Highlighting
+
+### C1: Research tree-sitter-yaml node types
+
+Read the tree-sitter-yaml grammar (`grammar.js`) to identify all valid node types: `block_mapping_pair`, `flow_sequence`, `block_scalar`, `double_quote_scalar`, `single_quote_scalar`, `integer_scalar`, `float_scalar`, `boolean_scalar`, `null_scalar`, `string_scalar`, `anchor`, `alias`, `tag`, `error`, etc.
+
+### C2: Write full highlights.scm
+
+Cover all LSP semantic token types mapped to tree-sitter captures:
+- `@comment` — comments
+- `@string` — all string scalar types
+- `@number` — integers and floats
+- `@boolean` — true/false
+- `@constant` — null
+- `@keyword` — block mapping keys that match Atmos keywords (import, vars, settings, etc.)
+- `@type` — metadata.type value, component type keys
+- `@function` — component names under terraform/helmfile
+- `@string.special` — unquoted import path values
+- `@label` — Go template expressions
+
+### C3: Verify other query files
+
+Ensure `brackets.scm`, `outline.scm`, and `indents.scm` are syntactically valid and functional.
+
+## Workstream D: File Icon Theme
+
+### Problem
+
+Zed icon themes map by `file_suffixes` or `file_stems`, not by content pattern. Since Atmos uses `.yaml` suffix (same as regular YAML), we can't distinguish Atmos YAML from plain YAML via file extension alone.
+
+### Approach
+
+Ship a companion icon theme extension that replaces the YAML file icon with the Atmos logo. Rationale: users who install the Atmos extension are working in Atmos repos where `.yaml` = Atmos YAML. The icon theme is a separate extension so users can choose to use it or stick with their existing icon theme.
+
+### Structure
 
 ```
-▸ tenant1-ue2-prod (stack)
-  ▸ terraform
-    ▸ vpc/1
-    ▸ vpc-flow-logs-bucket
-    ▸ eks/cluster
-  ▸ helmfile
-    ▸ cert-manager
-    ▸ ingress-nginx
+atmos-icon-theme/
+├── extension.toml
+├── icon_themes/
+│   └── atmos-icon-theme.json
+└── icons/
+    └── file.svg  (already downloaded)
 ```
 
-Built via `outline.scm` capturing top-level component keys under `components.terraform.*` and `components.helmfile.*`.
+The `atmos-icon-theme.json` maps `yaml`/`yml` suffixes → the Atmos logo SVG.
 
-## LSP Features (v1)
+## Workstream E: Operational Polish
 
-### Go-to-Definition
+### E1: Structured logging
 
-**On an import path** (value under `import:`):
-- Resolve relative path from importing file's directory, append `.yaml` if needed
-- Expand globs via filepath.Glob (relative to `stacks.base_path`)
-- Evaluate Go template expressions using context variables from the file's `vars:` section and import context
-- Jump to the resolved file
+Add `--debug` flag to the bridge binary. `log/slog` with levels. Debug mode logs all LSP messages; normal mode logs only errors and startup info.
 
-**On an `inherits` value** (under `metadata.inherits:`):
-- Search all indexed files for a component whose key matches the inherited name
-- Support relative inheritance paths (sibling/ancestor components)
-- Support list-form multiple inheritance
+### E2: User-facing configuration
 
-### Find References
+Support these settings via `initialization_options` or workspace configuration:
+- `atmos_cli_path` — override path to `atmos` binary
+- `stacks_path` — override stacks base path (skip atmos.yaml parsing)
+- `diagnostics_enabled` — toggle best-practice diagnostics
+- `log_level` — "debug", "info", "warn", "error"
 
-- Given a file path: return all import statements across the workspace that resolve to this file
-- Given a component name: return all `inherits` references that point to it
+### E3: Integration tests
 
-### Hover
+Add tests for the proxy→handler pipeline:
+- Full initialize→initialized→definition→shutdown lifecycle
+- Downstream forwarding (mock atmos LSP)
+- Error recovery when downstream crashes
 
-- Over a setting value: walk the import chain and display which files contributed, in merge order
-- Shows the effective value and where it was set/overridden
+### E4: Incremental index updates
 
-### Diagnostics
+Instead of full walk on every re-index, parse only changed files and update the index maps incrementally. Keeps the current full-walk Reindex() as a fallback for initial build.
 
-- Unresolved import paths → `WARNING`
-- Circular imports → `ERROR`
-- Go template parse/evaluation failures → `ERROR` or `WARNING`
-- Remote imports (HTTPS URLs) → `INFO` (not processed by this LSP)
+## Implementation Order
 
-## LSP Internals
+1. **First:** Workstream A (proxy fixes) + Workstream B (manifest) — unblock functionality
+2. **Then in parallel:** Workstream C (highlighting) + Workstream D (icon theme) + Workstream E (polish)
+3. **Finally:** End-to-end integration test against the CloudPosse test project
 
-### Index
-
-```go
-type Index struct {
-    mu       sync.RWMutex
-    files    map[string]*StackFile  // path -> parsed file
-    comps    map[string][]Location  // component name -> all definitions
-    byImport map[string][]string    // path -> files that import it
-}
-
-type StackFile struct {
-    Path    string
-    Imports []ImportNode
-    Comps   []CompNode
-}
-
-type ImportNode struct {
-    Path     string   // raw import path (may have globs/templates)
-    Range    Range    // source position
-    Resolves []string // resolved filesystem paths
-}
-```
-
-### Workspace Detection
-
-On `initialize`, search upward from workspace root for `atmos.yaml`. Read `stacks.base_path`, `stacks.included_paths`, `stacks.excluded_paths` to determine which directories to watch.
-
-### File Watching
-
-- Watch `stacks.base_path` recursively via fsnotify
-- Debounce re-indexing at 200ms
-- On delete: remove from index, clear associated diagnostics
-
-## Distribution
-
-Pre-compiled Go binaries for macOS (arm64/amd64) and Linux (amd64) hosted on GitHub Releases. The Rust WASM shim downloads the correct binary to a cache directory on first launch. Binaries are ~10MB.
-
-## Testing
+## Testing Plan
 
 | Level | Scope | Approach |
 |---|---|---|
-| LSP protocol | handler correctness | `go test` with YAML fixture files |
-| Import resolution | globs, templates, paths | Table-driven `go test` |
-| Cross-file references | Index updates, diagnostics | Integration test against fixture repo in `lsp/testdata/` |
-| Extension packaging | WASM compiles, TOML valid | `cargo check --target wasm32-wasip1` |
-| End-to-end | Real Atmos repo in Zed | Manual QA checklist |
+| Unit | parser, resolver, diagnostics | Existing `go test` suite (all passing) |
+| Unit | proxy sync request/response | New `go test` with mock atmos process |
+| Integration | Initialize→forward→merge | Test handler with real LSP messages |
+| Integration | File watcher | Test fsnotify triggers re-index |
+| End-to-end | Real Atmos repo in Zed | Manual QA: definition, references, hover, diagnostics, completions |
