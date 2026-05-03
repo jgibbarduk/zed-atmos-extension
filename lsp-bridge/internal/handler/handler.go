@@ -116,9 +116,23 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 		rootPath = strings.TrimPrefix(params.RootURI, "file://")
 	}
 
+	// Parse initialization_options for user configuration.
+	var initOpts struct {
+		InitializationOptions Config `json:"initializationOptions"`
+	}
+	json.Unmarshal(req.Params, &initOpts)
+
 	if rootPath != "" {
-		stacksPath := resolveStacksPath(rootPath)
-		h.idx.SetBasePath(stacksPath)
+		if initOpts.InitializationOptions.StacksPath != "" {
+			h.idx.SetBasePath(initOpts.InitializationOptions.StacksPath)
+		} else {
+			stacksPath := resolveStacksPath(rootPath)
+			h.idx.SetBasePath(stacksPath)
+		}
+	}
+
+	if initOpts.InitializationOptions.DiagnosticsEnabled != nil && !*initOpts.InitializationOptions.DiagnosticsEnabled {
+		h.diagnosticsDisabled = true
 	}
 
 	downstreamResp, err := h.downstream.CallDownstream(content)
