@@ -19,7 +19,7 @@
   key: (flow_node
     (plain_scalar
       (string_scalar) @keyword))
-  (#match? @keyword "^(import|vars|settings|env|components|metadata|terraform|helmfile|providers|overrides|backend|remote_state|workflows)$"))
+  (#match? @keyword "^(import|vars|locals|settings|env|components|metadata|terraform|helmfile|providers|overrides|backend|remote_state|workflows)$"))
 
 ; === Component names under terraform/helmfile ===
 (block_mapping_pair

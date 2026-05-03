@@ -376,6 +376,10 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 		}
 	}
 
+	if hoverContent == nil {
+		return false, nil, nil, nil
+	}
+
 	result := map[string]interface{}{
 		"contents": hoverContent,
 	}
@@ -414,18 +418,28 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 		h.idx.ReindexFile(path)
 	}
 
+	// Forward notification to downstream atmos LSP for its own validation.
+	if err := h.downstream.SendNotification(content); err != nil {
+		log.Printf("diagnostics: forward to atmos failed: %v", err)
+	}
+
 	diags := runBestPracticeChecks(f, filepath.Dir(path), h.idx)
 
-	notification := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  "textDocument/publishDiagnostics",
-		"params": map[string]interface{}{
-			"uri":         req.Params.TextDocument.URI,
-			"diagnostics": diags,
-		},
+	notifications := [][]byte{}
+	if len(diags) > 0 {
+		notification := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"method":  "textDocument/publishDiagnostics",
+			"params": map[string]interface{}{
+				"uri":         req.Params.TextDocument.URI,
+				"diagnostics": diags,
+			},
+		}
+		notifBytes, _ := json.Marshal(notification)
+		notifications = append(notifications, notifBytes)
 	}
-	notifBytes, _ := json.Marshal(notification)
-	return false, nil, [][]byte{notifBytes}, nil
+
+	return true, nil, notifications, nil
 }
 
 func resolveStacksPath(rootPath string) string {
