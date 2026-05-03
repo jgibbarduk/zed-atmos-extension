@@ -52,6 +52,14 @@ func WriteMessage(w io.Writer, content []byte) error {
 	return nil
 }
 
+func IsNotification(content []byte) bool {
+	var msg struct {
+		ID json.RawMessage `json:"id"`
+	}
+	json.Unmarshal(content, &msg)
+	return msg.ID == nil
+}
+
 func ParseMethod(content []byte) string {
 	var msg struct {
 		Method string `json:"method"`

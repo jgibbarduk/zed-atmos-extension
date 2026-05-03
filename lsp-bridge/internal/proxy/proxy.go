@@ -12,14 +12,15 @@ import (
 )
 
 type Handler interface {
-	HandleMethod(method string, content []byte) (handled bool, response []byte, err error)
+	HandleMethod(method string, content []byte) (handled bool, response []byte, notifications [][]byte, err error)
 }
 
 type Proxy struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	mu     sync.Mutex
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stdoutBuf *bufio.Reader
+	mu       sync.Mutex
 }
 
 func New(atmosPath string) (*Proxy, error) {
@@ -40,13 +41,14 @@ func New(atmosPath string) (*Proxy, error) {
 	}
 
 	return &Proxy{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: stdout,
+		cmd:      cmd,
+		stdin:    stdin,
+		stdout:   stdout,
+		stdoutBuf: bufio.NewReader(stdout),
 	}, nil
 }
 
-func (p *Proxy) forwardToAtmos(content []byte) ([]byte, error) {
+func (p *Proxy) CallDownstream(content []byte) ([]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -54,12 +56,21 @@ func (p *Proxy) forwardToAtmos(content []byte) ([]byte, error) {
 		return nil, fmt.Errorf("write to atmos: %w", err)
 	}
 
-	reader := bufio.NewReader(p.stdout)
-	msg, err := lsp.ReadMessage(reader)
+	if lsp.IsNotification(content) {
+		return nil, nil
+	}
+
+	msg, err := lsp.ReadMessage(p.stdoutBuf)
 	if err != nil {
 		return nil, fmt.Errorf("read from atmos: %w", err)
 	}
 	return msg.Content, nil
+}
+
+func (p *Proxy) SendNotification(content []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return lsp.WriteMessage(p.stdin, content)
 }
 
 func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
@@ -75,24 +86,32 @@ func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
 		}
 
 		method := lsp.ParseMethod(msg.Content)
-		var response []byte
 
-		handled, handledResp, err := handler.HandleMethod(method, msg.Content)
+		handled, handledResp, notifications, err := handler.HandleMethod(method, msg.Content)
 		if err != nil {
 			log.Printf("handler error for %s: %v", method, err)
 		}
+
+		var response []byte
 		if handled {
 			response = handledResp
+			for _, notif := range notifications {
+				if err := lsp.WriteMessage(stdout, notif); err != nil {
+					log.Printf("write notification: %v", err)
+				}
+			}
 		} else {
-			response, err = p.forwardToAtmos(msg.Content)
+			response, err = p.CallDownstream(msg.Content)
 			if err != nil {
 				log.Printf("forward error: %v", err)
 				continue
 			}
 		}
 
-		if err := lsp.WriteMessage(stdout, response); err != nil {
-			return fmt.Errorf("write stdout: %w", err)
+		if response != nil {
+			if err := lsp.WriteMessage(stdout, response); err != nil {
+				return fmt.Errorf("write stdout: %w", err)
+			}
 		}
 	}
 }
