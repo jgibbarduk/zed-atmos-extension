@@ -4,6 +4,7 @@
   (#match? @keyword "^(import|vars|settings|env|components|metadata|terraform|helmfile|provider|backend|overrides|namespace|tenant|environment|stage)$"))
 
 ; Component names under components.terraform.* or components.helmfile.*
+; Assumes the value uses block_mapping syntax (i.e., indented sub-keys).
 (block_mapping_pair
   key: (flow_node (plain_scalar (string_scalar) @_comp_type))
   (#match? @_comp_type "^(terraform|helmfile)$")
