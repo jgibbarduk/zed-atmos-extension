@@ -37,6 +37,7 @@ type LSPHandler struct {
 	downstream         DownstreamCaller
 	initialized         bool
 	diagnosticsDisabled bool
+	projectRoot         string
 }
 
 func New(idx *index.Index, downstream DownstreamCaller) *LSPHandler {
@@ -123,6 +124,7 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 	json.Unmarshal(req.Params, &initOpts)
 
 	if rootPath != "" {
+		h.projectRoot = rootPath
 		if initOpts.InitializationOptions.StacksPath != "" {
 			h.idx.SetBasePath(initOpts.InitializationOptions.StacksPath)
 		} else {
@@ -341,7 +343,11 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 				if len(resolved) > 0 {
 					value += "**Resolves to:**\n"
 					for _, r := range resolved {
-						value += fmt.Sprintf("- `%s`\n", r)
+						rel, err := filepath.Rel(h.projectRoot, r)
+						if err != nil {
+							rel = r
+						}
+						value += fmt.Sprintf("- `%s`\n", rel)
 					}
 				} else {
 					value += "*Unable to resolve path*"
@@ -362,7 +368,11 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 						value += "**Also defined in:**\n"
 						for _, sf := range inheritors {
 							if sf.Path != path {
-								value += fmt.Sprintf("- `%s`\n", sf.Path)
+								rel, err := filepath.Rel(h.projectRoot, sf.Path)
+								if err != nil {
+									rel = sf.Path
+								}
+								value += fmt.Sprintf("- `%s`\n", rel)
 							}
 						}
 					}
