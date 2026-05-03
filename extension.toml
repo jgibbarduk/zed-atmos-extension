@@ -1,0 +1,15 @@
+id = "atmos"
+name = "Atmos"
+version = "0.1.0"
+schema_version = 1
+authors = ["James Gibbard <james@example.com>"]
+description = "Atmos stack configuration support with import resolution, inheritance navigation, and best-practice hints"
+repository = "https://github.com/jamesgibbard/zed-atmos-language"
+
+[grammars.yaml]
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"
+rev = "0.7.0"
+
+[language_servers.atmos-lsp-bridge]
+name = "Atmos LSP Bridge"
+languages = ["Atmos"]

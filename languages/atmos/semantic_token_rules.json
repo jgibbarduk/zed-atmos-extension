@@ -1,0 +1,22 @@
+[
+  {
+    "token_type": "keyword",
+    "style": ["keyword"]
+  },
+  {
+    "token_type": "function",
+    "style": ["function"]
+  },
+  {
+    "token_type": "type",
+    "style": ["type"]
+  },
+  {
+    "token_type": "macro",
+    "style": ["keyword"]
+  },
+  {
+    "token_type": "string",
+    "style": ["string.special"]
+  }
+]

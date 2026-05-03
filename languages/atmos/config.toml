@@ -1,0 +1,6 @@
+name = "Atmos"
+grammar = "yaml"
+path_suffixes = ["yaml", "yml"]
+line_comments = ["# "]
+tab_size = 2
+first_line_pattern = "^(import|vars|settings|env|components|metadata|terraform|helmfile):"
