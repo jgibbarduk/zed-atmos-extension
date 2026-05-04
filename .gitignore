@@ -2,3 +2,4 @@
 /extension.wasm
 /grammars/
 /lsp-bridge/atmos-lsp-bridge
+/.worktrees/
