@@ -271,6 +271,22 @@ func (h *LSPHandler) handleDefinition(content []byte) (bool, []byte, [][]byte, e
 		}
 	}
 
+	// Check if cursor is on a !terraform.state tag
+	for _, ts := range f.TerraformState {
+		if ts.Range.StartLine <= req.Params.Position.Line && ts.Range.EndLine >= req.Params.Position.Line {
+			refs := h.idx.FindComponent(ts.Component)
+			for _, ref := range refs {
+				locations = append(locations, map[string]interface{}{
+					"uri": "file://" + ref.Path,
+					"range": map[string]interface{}{
+						"start": map[string]uint32{"line": 0, "character": 0},
+						"end":   map[string]uint32{"line": 0, "character": 0},
+					},
+				})
+			}
+		}
+	}
+
 	if locations == nil {
 		locations = []map[string]interface{}{}
 	}
@@ -430,6 +446,29 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 						value += "\n**Accumulated vars:**\n"
 						for k, v := range vars {
 							value += fmt.Sprintf("- `%s`: `%s`\n", k, v)
+						}
+					}
+					hoverContent = map[string]interface{}{
+						"kind":  "markdown",
+						"value": value,
+					}
+					break
+				}
+			}
+		}
+		if hoverContent == nil {
+			for _, ts := range f.TerraformState {
+				if ts.Range.StartLine <= req.Params.Position.Line && ts.Range.EndLine >= req.Params.Position.Line {
+					value := fmt.Sprintf("**Remote state reference:** `%s`\n\nJQ expression: `%s`\n", ts.Component, ts.JQExpr)
+					refs := h.idx.FindComponent(ts.Component)
+					if len(refs) > 0 {
+						value += "\n**Component defined in:**\n"
+						for _, ref := range refs {
+							rel, err := filepath.Rel(h.projectRoot, ref.Path)
+							if err != nil {
+								rel = ref.Path
+							}
+							value += fmt.Sprintf("- `%s`\n", rel)
 						}
 					}
 					hoverContent = map[string]interface{}{
