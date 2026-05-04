@@ -29,26 +29,61 @@ type CompNode struct {
 	Range Range  `json:"range"`
 }
 
+type MetadataNode struct {
+	Component      string `json:"component,omitempty"`
+	ComponentRange Range  `json:"component_range,omitempty"`
+	Inherits       string `json:"inherits,omitempty"`
+	InheritsRange  Range  `json:"inherits_range,omitempty"`
+	Type           string `json:"type,omitempty"`
+	Range          Range  `json:"range"`
+}
+
+type VarNode struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`
+	Range    Range  `json:"range"`
+	IsQuoted bool   `json:"is_quoted"`
+}
+
+type DepNode struct {
+	Component string `json:"component"`
+	Range     Range  `json:"range"`
+}
+
+type TerraformStateRef struct {
+	Component string `json:"component"`
+	JQExpr    string `json:"jq_expr"`
+	Range     Range  `json:"range"`
+}
+
 type StackFile struct {
-	Path    string       `json:"path"`
-	Imports []ImportNode `json:"imports"`
-	Comps   []CompNode   `json:"comps"`
+	Path           string              `json:"path"`
+	Imports        []ImportNode        `json:"imports"`
+	Comps          []CompNode          `json:"comps"`
+	Metadata       []MetadataNode      `json:"metadata"`
+	Vars           []VarNode           `json:"vars"`
+	Deps           []DepNode           `json:"deps"`
+	TerraformState []TerraformStateRef `json:"terraform_state"`
 }
 
 type Index struct {
-	mu       sync.RWMutex
-	Files    map[string]*StackFile
-	ByImport map[string][]string
-	BasePath string
-	watcher  *fsnotify.Watcher
-	onChange func()
+	mu          sync.RWMutex
+	Files       map[string]*StackFile
+	ByImport    map[string][]string
+	ByComponent map[string][]string
+	ByInherit   map[string][]string
+	BasePath    string
+	watcher     *fsnotify.Watcher
+	onChange    func()
 }
 
 func New(basePath string) (*Index, error) {
 	return &Index{
-		Files:    make(map[string]*StackFile),
-		ByImport: make(map[string][]string),
-		BasePath: basePath,
+		Files:       make(map[string]*StackFile),
+		ByImport:    make(map[string][]string),
+		ByComponent: make(map[string][]string),
+		ByInherit:   make(map[string][]string),
+		BasePath:    basePath,
 	}, nil
 }
 
@@ -109,6 +144,8 @@ func (idx *Index) Reindex() {
 
 	idx.Files = make(map[string]*StackFile)
 	idx.ByImport = make(map[string][]string)
+	idx.ByComponent = make(map[string][]string)
+	idx.ByInherit = make(map[string][]string)
 
 	filepath.Walk(idx.BasePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -131,6 +168,17 @@ func (idx *Index) Reindex() {
 		idx.Files[path] = sf
 		for _, imp := range sf.Imports {
 			idx.ByImport[imp.RawPath] = append(idx.ByImport[imp.RawPath], path)
+		}
+		for _, comp := range sf.Comps {
+			idx.ByComponent[comp.Name] = append(idx.ByComponent[comp.Name], path)
+		}
+		for _, meta := range sf.Metadata {
+			if meta.Component != "" {
+				idx.ByComponent[meta.Component] = append(idx.ByComponent[meta.Component], path)
+			}
+			if meta.Inherits != "" {
+				idx.ByInherit[meta.Inherits] = append(idx.ByInherit[meta.Inherits], path)
+			}
 		}
 		return nil
 	})
@@ -211,11 +259,60 @@ func (idx *Index) ReindexFile(path string) {
 				delete(idx.ByImport, old.RawPath)
 			}
 		}
+		for _, old := range oldFile.Comps {
+			oldFiles := idx.ByComponent[old.Name]
+			for i, p := range oldFiles {
+				if p == path {
+					idx.ByComponent[old.Name] = append(oldFiles[:i], oldFiles[i+1:]...)
+					break
+				}
+			}
+			if len(idx.ByComponent[old.Name]) == 0 {
+				delete(idx.ByComponent, old.Name)
+			}
+		}
+		for _, old := range oldFile.Metadata {
+			if old.Component != "" {
+				oldFiles := idx.ByComponent[old.Component]
+				for i, p := range oldFiles {
+					if p == path {
+						idx.ByComponent[old.Component] = append(oldFiles[:i], oldFiles[i+1:]...)
+						break
+					}
+				}
+				if len(idx.ByComponent[old.Component]) == 0 {
+					delete(idx.ByComponent, old.Component)
+				}
+			}
+			if old.Inherits != "" {
+				oldFiles := idx.ByInherit[old.Inherits]
+				for i, p := range oldFiles {
+					if p == path {
+						idx.ByInherit[old.Inherits] = append(oldFiles[:i], oldFiles[i+1:]...)
+						break
+					}
+				}
+				if len(idx.ByInherit[old.Inherits]) == 0 {
+					delete(idx.ByInherit, old.Inherits)
+				}
+			}
+		}
 	}
 
 	idx.Files[path] = sf
 	for _, imp := range sf.Imports {
 		idx.ByImport[imp.RawPath] = append(idx.ByImport[imp.RawPath], path)
+	}
+	for _, comp := range sf.Comps {
+		idx.ByComponent[comp.Name] = append(idx.ByComponent[comp.Name], path)
+	}
+	for _, meta := range sf.Metadata {
+		if meta.Component != "" {
+			idx.ByComponent[meta.Component] = append(idx.ByComponent[meta.Component], path)
+		}
+		if meta.Inherits != "" {
+			idx.ByInherit[meta.Inherits] = append(idx.ByInherit[meta.Inherits], path)
+		}
 	}
 }
 

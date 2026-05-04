@@ -2,6 +2,7 @@ package index
 
 import (
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -38,12 +39,30 @@ func parseYAMLFile(path string) (*StackFile, error) {
 			sf.Imports = extractImports(val)
 		}
 
+		if keyStr == "vars" && val != nil {
+			extractVars(val, sf, keyStr)
+		}
+
 		if keyStr == "components" && val != nil && val.Kind == yaml.MappingNode {
 			extractComponents(val, sf)
 		}
 	}
 
+	extractTerraformStateTags(root, sf)
+
 	return sf, nil
+}
+
+func nodeRange(n *yaml.Node) Range {
+	if n == nil {
+		return Range{}
+	}
+	return Range{
+		StartLine: uint32(n.Line - 1),
+		StartChar: uint32(n.Column - 1),
+		EndLine:   uint32(n.Line - 1),
+		EndChar:   uint32(n.Column - 1 + len(n.Value)),
+	}
 }
 
 func extractImports(node *yaml.Node) []ImportNode {
@@ -100,6 +119,139 @@ func extractComponents(node *yaml.Node, sf *StackFile) {
 					EndChar:   uint32(compKey.Column - 1 + len(compName)),
 				},
 			})
+
+			if compTypeVal != nil && j+1 < len(compTypeVal.Content) {
+				compVal := compTypeVal.Content[j+1]
+				if compVal != nil && compVal.Kind == yaml.MappingNode {
+					extractMetadata(compVal, sf)
+					extractDependencies(compVal, sf)
+					for k := 0; k < len(compVal.Content)-1; k += 2 {
+						cvKey := compVal.Content[k]
+						cvVal := compVal.Content[k+1]
+						if cvKey.Value == "vars" {
+							extractVars(cvVal, sf, cvKey.Value)
+						}
+					}
+				}
+			}
 		}
+	}
+}
+
+func extractMetadata(compNode *yaml.Node, sf *StackFile) {
+	if compNode == nil || compNode.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(compNode.Content)-1; i += 2 {
+		key := compNode.Content[i]
+		val := compNode.Content[i+1]
+		if key.Value != "metadata" || val == nil || val.Kind != yaml.MappingNode {
+			continue
+		}
+		meta := MetadataNode{
+			Range: Range{
+				StartLine: uint32(val.Line - 1),
+				StartChar: uint32(val.Column - 1),
+				EndLine:   uint32(val.Line - 1),
+				EndChar:   uint32(val.Column - 1),
+			},
+		}
+		for j := 0; j < len(val.Content)-1; j += 2 {
+			metaKey := val.Content[j]
+			metaVal := val.Content[j+1]
+			switch metaKey.Value {
+			case "component":
+				meta.Component = metaVal.Value
+				meta.ComponentRange = nodeRange(metaVal)
+			case "inherits":
+				if metaVal.Kind == yaml.ScalarNode {
+					meta.Inherits = metaVal.Value
+					meta.InheritsRange = nodeRange(metaVal)
+				} else if metaVal.Kind == yaml.SequenceNode && len(metaVal.Content) > 0 {
+					meta.Inherits = metaVal.Content[0].Value
+					meta.InheritsRange = nodeRange(metaVal.Content[0])
+				}
+			case "type":
+				meta.Type = metaVal.Value
+			}
+		}
+		sf.Metadata = append(sf.Metadata, meta)
+	}
+}
+
+func extractDependencies(compNode *yaml.Node, sf *StackFile) {
+	if compNode == nil || compNode.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(compNode.Content)-1; i += 2 {
+		key := compNode.Content[i]
+		val := compNode.Content[i+1]
+		if key.Value != "dependencies" || val == nil || val.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j < len(val.Content)-1; j += 2 {
+			depKey := val.Content[j]
+			depVal := val.Content[j+1]
+			if depKey.Value != "components" || depVal == nil || depVal.Kind != yaml.SequenceNode {
+				continue
+			}
+			for _, item := range depVal.Content {
+				if item.Kind == yaml.ScalarNode {
+					sf.Deps = append(sf.Deps, DepNode{
+						Component: item.Value,
+						Range:     nodeRange(item),
+					})
+				}
+			}
+		}
+	}
+}
+
+func extractTerraformStateTags(node *yaml.Node, sf *StackFile) {
+	if node == nil {
+		return
+	}
+	if node.Tag == "!terraform.state" && node.Kind == yaml.ScalarNode {
+		parts := strings.Fields(node.Value)
+		ref := TerraformStateRef{
+			Range: nodeRange(node),
+		}
+		if len(parts) > 0 {
+			ref.Component = parts[0]
+			if len(parts) > 1 {
+				ref.JQExpr = strings.Join(parts[1:], " ")
+			}
+		}
+		sf.TerraformState = append(sf.TerraformState, ref)
+	}
+	for _, child := range node.Content {
+		extractTerraformStateTags(child, sf)
+	}
+}
+
+func extractVars(node *yaml.Node, sf *StackFile, key string) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		k := node.Content[i]
+		v := node.Content[i+1]
+		if k.Kind != yaml.ScalarNode {
+			continue
+		}
+		var valueStr string
+		if v != nil && v.Kind == yaml.ScalarNode {
+			valueStr = v.Value
+		}
+		isQuoted := false
+		if v != nil {
+			isQuoted = v.Style == yaml.DoubleQuotedStyle || v.Style == yaml.SingleQuotedStyle
+		}
+		sf.Vars = append(sf.Vars, VarNode{
+			Key:      k.Value,
+			Value:    valueStr,
+			Range:    nodeRange(k),
+			IsQuoted: isQuoted,
+		})
 	}
 }
