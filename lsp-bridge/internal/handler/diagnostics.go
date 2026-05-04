@@ -110,6 +110,9 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 
 	// Check 7: Validate dependencies.components
 	for _, dep := range file.Deps {
+		if dep.Component == "" {
+			continue
+		}
 		refs := idx.FindComponent(dep.Component)
 		if len(refs) == 0 {
 			diags = append(diags, Diagnostic{
