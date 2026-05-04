@@ -15,7 +15,7 @@ import (
 type mockDownstream struct{}
 
 func (m *mockDownstream) CallDownstream(content []byte) ([]byte, error) { return nil, nil }
-func (m *mockDownstream) SendNotification(content []byte) error          { return nil }
+func (m *mockDownstream) SendNotification(content []byte) error         { return nil }
 
 func extractResult(resp []byte, v interface{}) {
 	var wrapper map[string]json.RawMessage
@@ -25,8 +25,12 @@ func extractResult(resp []byte, v interface{}) {
 	}
 }
 
-func mustMarshal(v interface{}) []byte {
-	b, _ := json.Marshal(v)
+func mustMarshal(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return b
 }
 
@@ -61,7 +65,7 @@ func TestHandleDefinition_Import(t *testing.T) {
 	idx2.Reindex()
 	h2 := New(idx2, &mockDownstream{})
 	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
-	content := mustMarshal(map[string]interface{}{
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
@@ -94,12 +98,15 @@ func TestHandleDefinition_ComponentKey(t *testing.T) {
 	os.MkdirAll(filepath.Dir(stackPath), 0755)
 	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    database:\n      vars:\n        size: large\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 	h := New(idx, &mockDownstream{})
 
-	content := mustMarshal(map[string]interface{}{
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
@@ -128,13 +135,16 @@ func TestHandleHover_ComponentWithStackName(t *testing.T) {
 	os.MkdirAll(filepath.Dir(stackPath), 0755)
 	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\n  environment: staging\ncomponents:\n  terraform:\n    database:\n      vars:\n        size: large\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 	h := New(idx, &mockDownstream{})
 	h.nameTemplate = "{{ .namespace }}-{{ .environment }}"
 
-	content := mustMarshal(map[string]interface{}{
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
@@ -171,18 +181,21 @@ func TestHandleHover_TemplateExpression(t *testing.T) {
 	os.MkdirAll(filepath.Dir(stackPath), 0755)
 	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\ncomponents:\n  terraform:\n    database:\n      vars:\n        db_name: '{{ .vars.namespace }}_db'\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 	h := New(idx, &mockDownstream{})
 
-	// Hover over the db_name value line (line 6 in 0-indexed)
-	content := mustMarshal(map[string]interface{}{
+	// Hover over the db_name value line (line 6 in 0-indexed), cursor on the value
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
 			"textDocument": map[string]string{"uri": "file://" + stackPath},
-			"position":     map[string]uint32{"line": 6, "character": 10},
+			"position":     map[string]uint32{"line": 6, "character": 20},
 		},
 	})
 
@@ -214,12 +227,15 @@ func TestHandleRename_ComponentKey(t *testing.T) {
 	os.MkdirAll(filepath.Dir(stackPath), 0755)
 	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    database:\n      vars:\n        size: large\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 	h := New(idx, &mockDownstream{})
 
-	content := mustMarshal(map[string]interface{}{
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
@@ -260,13 +276,16 @@ func TestHandleRename_MetadataComponent(t *testing.T) {
 	os.MkdirAll(filepath.Dir(stackPath), 0755)
 	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    database:\n      metadata:\n        component: database\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 	h := New(idx, &mockDownstream{})
 
 	// Cursor on metadata.component value "database" at line 4 (0-indexed)
-	content := mustMarshal(map[string]interface{}{
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
@@ -315,13 +334,16 @@ func TestHandleRename_TerraformState(t *testing.T) {
 	os.MkdirAll(filepath.Dir(stackPath), 0755)
 	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    database:\n      vars:\n        state: !terraform.state database .outputs.id\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 	h := New(idx, &mockDownstream{})
 
 	// Cursor on terraform.state line (line 4 in 0-indexed)
-	content := mustMarshal(map[string]interface{}{
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
@@ -363,12 +385,15 @@ func TestHandleCodeAction_Scaffold(t *testing.T) {
 	os.MkdirAll(filepath.Dir(stackPath), 0755)
 	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    new-service:\n      vars:\n        size: large\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 	h := New(idx, &mockDownstream{})
 
-	content := mustMarshal(map[string]interface{}{
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
@@ -414,12 +439,15 @@ func TestHandleHover_Import(t *testing.T) {
 	os.MkdirAll(filepath.Dir(stackPath), 0755)
 	os.WriteFile(stackPath, []byte("import:\n  - defaults\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 	h := New(idx, &mockDownstream{})
 
-	content := mustMarshal(map[string]interface{}{
+	content := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"params": map[string]interface{}{
@@ -454,7 +482,10 @@ func TestNodeRange_QuotedKey(t *testing.T) {
 	path := filepath.Join(dir, "test.yaml")
 	os.WriteFile(path, []byte("components:\n  terraform:\n    \"quoted-key\":\n      vars:\n        x: 1\n"), 0644)
 
-	idx, _ := index.New(dir)
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx.SetBasePath(dir)
 	idx.Reindex()
 

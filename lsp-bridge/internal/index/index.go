@@ -239,7 +239,7 @@ func (idx *Index) FindComponent(name string) []StackFile {
 	var results []StackFile
 	for _, p := range paths {
 		if f, ok := idx.files[p]; ok {
-			results = append(results, *f)
+			results = append(results, *deepCopyStackFile(f))
 		}
 	}
 	return results

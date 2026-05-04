@@ -37,12 +37,12 @@ type textDocumentParams struct {
 }
 
 type LSPHandler struct {
-	idx                *index.Index
-	downstream         DownstreamCaller
+	idx                 *index.Index
+	downstream          DownstreamCaller
 	initialized         bool
 	diagnosticsDisabled bool
 	projectRoot         string
-	nameTemplate       string
+	nameTemplate        string
 }
 
 func New(idx *index.Index, downstream DownstreamCaller) *LSPHandler {
@@ -195,13 +195,19 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 		},
 	}
 
-	resultBytes, _ := json.Marshal(result)
+	resultBytes, err := json.Marshal(result)
+	if err != nil {
+		return true, errorResponse(content, -32603, "Internal error"), nil, nil
+	}
 	resp := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      req.ID,
 		"result":  json.RawMessage(resultBytes),
 	}
-	respBytes, _ := json.Marshal(resp)
+	respBytes, err := json.Marshal(resp)
+	if err != nil {
+		return true, errorResponse(content, -32603, "Internal error"), nil, nil
+	}
 	return true, respBytes, nil, nil
 }
 
@@ -216,7 +222,7 @@ func (h *LSPHandler) handleInitialized(content []byte) (bool, []byte, [][]byte, 
 	if err := h.downstream.SendNotification(content); err != nil {
 		log.Printf("initialized: forward to atmos failed: %v", err)
 	}
-	return false, nil, nil, nil
+	return true, nil, nil, nil
 }
 
 func (h *LSPHandler) handleDefinition(content []byte) (bool, []byte, [][]byte, error) {
@@ -806,8 +812,8 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 	}
 
 	var req struct {
-		JSONRPC string          `json:"jsonrpc"`
-		Method  string          `json:"method"`
+		JSONRPC string             `json:"jsonrpc"`
+		Method  string             `json:"method"`
 		Params  textDocumentParams `json:"params"`
 	}
 	if err := json.Unmarshal(content, &req); err != nil {
@@ -938,10 +944,10 @@ func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, lin
 		return "", ""
 	}
 	resolved = expr
+	vars := collectVars(sf, idx)
 	resolved = templateVarExprRe.ReplaceAllStringFunc(resolved, func(m string) string {
 		subs := templateVarExprRe.FindStringSubmatch(m)
 		if len(subs) > 1 {
-			vars := collectVars(sf, idx)
 			if v, ok := vars[subs[1]]; ok {
 				return v
 			}

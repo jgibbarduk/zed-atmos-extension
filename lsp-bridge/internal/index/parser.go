@@ -61,9 +61,7 @@ func nodeRange(n *yaml.Node) Range {
 		return Range{}
 	}
 	length := len(n.Value)
-	if n.Style == yaml.DoubleQuotedStyle {
-		length += 2
-	} else if n.Style == yaml.SingleQuotedStyle {
+	if n.Style == yaml.DoubleQuotedStyle || n.Style == yaml.SingleQuotedStyle {
 		length += 2
 	}
 	return Range{
@@ -249,7 +247,7 @@ func extractVars(node *yaml.Node, sf *StackFile) {
 		sf.Vars = append(sf.Vars, VarNode{
 			Key:      k.Value,
 			Value:    valueStr,
-			Range:    nodeRange(k),
+			Range:    nodeRange(v),
 			IsQuoted: isQuoted,
 		})
 	}
