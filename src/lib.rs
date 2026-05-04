@@ -16,7 +16,7 @@ impl Extension for AtmosExtension {
     ) -> Result<Command> {
         let binary_path = worktree
             .which("atmos-lsp-bridge")
-            .ok_or_else(|| "atmos-lsp-bridge not found in PATH. Install it from https://github.com/jamesgibbard/zed-atmos-language/releases".to_string())?;
+            .ok_or_else(|| "atmos-lsp-bridge not found in PATH. Install it from https://github.com/jgibbarduk/zed-atmos-extension/releases".to_string())?;
 
         Ok(Command {
             command: binary_path,

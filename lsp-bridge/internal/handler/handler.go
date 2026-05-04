@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/index"
-	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/lsp"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -706,7 +706,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 						}
 					}
 					if h.nameTemplate != "" {
-						preview := interpolateNameTemplate(h.nameTemplate, vars)
+						preview := interpolateNameTemplate(h.nameTemplate, vars, comp.Name)
 						if preview != "" {
 							value += fmt.Sprintf("\n\n**Stack name:** `%s`\n\nComputed from `atmos.yaml` `name_template` with accumulated vars.", preview)
 						}
@@ -906,7 +906,7 @@ var (
 	nameTemplateRemRe  = regexp.MustCompile(`{{\s*[^}]*\s*}}`)
 )
 
-func interpolateNameTemplate(tpl string, vars map[string]string) string {
+func interpolateNameTemplate(tpl string, vars map[string]string, componentName string) string {
 	result := nameTemplateVarsRe.ReplaceAllStringFunc(tpl, func(m string) string {
 		subs := nameTemplateVarsRe.FindStringSubmatch(m)
 		if len(subs) > 1 {
@@ -920,6 +920,9 @@ func interpolateNameTemplate(tpl string, vars map[string]string) string {
 	result = nameTemplateKeyRe.ReplaceAllStringFunc(result, func(m string) string {
 		subs := nameTemplateKeyRe.FindStringSubmatch(m)
 		if len(subs) > 1 {
+			if subs[1] == "atmos_component" && componentName != "" {
+				return componentName
+			}
 			if v, ok := vars[subs[1]]; ok {
 				return v
 			}
@@ -956,9 +959,9 @@ func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, lin
 	})
 	if strings.Contains(expr, "{{ .atmos_component }}") {
 		compName := ""
-		for _, comp := range sf.Comps {
-			if comp.Range.StartLine == line || comp.Range.StartLine == line-1 || comp.Range.StartLine == line+1 {
-				compName = comp.Name
+		for _, v := range sf.Vars {
+			if v.Range.StartLine == line && v.Range.StartChar <= char && v.Range.EndChar >= char {
+				compName = v.Component
 				break
 			}
 		}

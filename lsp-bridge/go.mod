@@ -1,4 +1,4 @@
-module github.com/jamesgibbard/zed-atmos-language/lsp-bridge
+module github.com/jgibbarduk/zed-atmos-extension/lsp-bridge
 
 go 1.22
 

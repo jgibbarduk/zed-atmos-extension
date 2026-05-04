@@ -39,10 +39,11 @@ type MetadataNode struct {
 }
 
 type VarNode struct {
-	Key      string `json:"key"`
-	Value    string `json:"value"`
-	Range    Range  `json:"range"`
-	IsQuoted bool   `json:"is_quoted"`
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	Range     Range  `json:"range"`
+	IsQuoted  bool   `json:"is_quoted"`
+	Component string `json:"component,omitempty"`
 }
 
 type DepNode struct {

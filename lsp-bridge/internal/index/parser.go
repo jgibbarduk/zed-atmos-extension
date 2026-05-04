@@ -40,7 +40,7 @@ func parseYAMLFile(path string) (*StackFile, error) {
 		}
 
 		if keyStr == "vars" && val != nil {
-			extractVars(val, sf)
+			extractVars(val, sf, "")
 		}
 
 		if keyStr == "components" && val != nil && val.Kind == yaml.MappingNode {
@@ -126,7 +126,7 @@ func extractComponents(node *yaml.Node, sf *StackFile) {
 						cvKey := compVal.Content[k]
 						cvVal := compVal.Content[k+1]
 						if cvKey.Value == "vars" {
-							extractVars(cvVal, sf)
+							extractVars(cvVal, sf, compName)
 						}
 					}
 				}
@@ -226,7 +226,7 @@ func extractTerraformStateTags(node *yaml.Node, sf *StackFile) {
 	}
 }
 
-func extractVars(node *yaml.Node, sf *StackFile) {
+func extractVars(node *yaml.Node, sf *StackFile, componentName string) {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return
 	}
@@ -245,10 +245,11 @@ func extractVars(node *yaml.Node, sf *StackFile) {
 			isQuoted = v.Style == yaml.DoubleQuotedStyle || v.Style == yaml.SingleQuotedStyle
 		}
 		sf.Vars = append(sf.Vars, VarNode{
-			Key:      k.Value,
-			Value:    valueStr,
-			Range:    nodeRange(v),
-			IsQuoted: isQuoted,
+			Key:       k.Value,
+			Value:     valueStr,
+			Range:     nodeRange(v),
+			IsQuoted:  isQuoted,
+			Component: componentName,
 		})
 	}
 }

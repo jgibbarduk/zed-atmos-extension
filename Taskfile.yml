@@ -1,0 +1,63 @@
+version: "3"
+
+tasks:
+  build:bridge:
+    desc: Build the Go LSP bridge binary
+    dir: lsp-bridge
+    cmds:
+      - go build -o atmos-lsp-bridge .
+
+  install:bridge:
+    desc: Build and install the LSP bridge to /usr/local/bin
+    deps: [build:bridge]
+    cmds:
+      - cp -f lsp-bridge/atmos-lsp-bridge /usr/local/bin/
+
+  build:wasm:
+    desc: Build the Rust WASM extension
+    cmds:
+      - cargo build --target wasm32-wasip1
+
+  install:ext:
+    desc: Build WASM and copy to extension.wasm
+    deps: [build:wasm]
+    cmds:
+      - cp -f target/wasm32-wasip1/debug/zed_atmos_language.wasm extension.wasm
+
+  check:
+    desc: Run all checks (format, lint, vet, test)
+    cmds:
+      - cargo fmt --check
+      - cargo clippy --target wasm32-wasip1 -- -D warnings
+      - cd lsp-bridge && go vet ./...
+      - cd lsp-bridge && go test ./...
+
+  test:
+    desc: Run Go tests
+    dir: lsp-bridge
+    cmds:
+      - go test ./...
+
+  test:verbose:
+    desc: Run Go tests with verbose output
+    dir: lsp-bridge
+    cmds:
+      - go test -v ./...
+
+  fmt:
+    desc: Format all code
+    cmds:
+      - cargo fmt
+      - cd lsp-bridge && gofmt -w .
+
+  setup:test:
+    desc: Clone the CloudPosse example Atmos project for testing
+    cmds:
+      - git clone --depth 1 https://github.com/cloudposse-examples/atmos-pro-example-advanced.git ../atmos-test-project 2>/dev/null || echo "Test project already exists at ../atmos-test-project"
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - cargo clean
+      - rm -f extension.wasm
+      - rm -f lsp-bridge/atmos-lsp-bridge

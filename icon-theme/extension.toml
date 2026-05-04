@@ -4,6 +4,6 @@ version = "0.1.0"
 schema_version = 1
 authors = ["James Gibbard <james@example.com>"]
 description = "File icons for Atmos projects — replaces the YAML file icon with the Atmos logo"
-repository = "https://github.com/jamesgibbard/zed-atmos-language"
+repository = "https://github.com/jgibbarduk/zed-atmos-extension"
 
 icon_themes = ["icon_themes/atmos-icon-theme"]

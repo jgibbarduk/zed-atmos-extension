@@ -1,6 +1,6 @@
 package navigation
 
-import "github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/index"
+import "github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
 
 type Location struct {
 	URI   string      `json:"uri"`

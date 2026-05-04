@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --target wasm32-wasip1 -- -D warnings
+      - name: Build
+        run: cargo build --target wasm32-wasip1
+
+  check-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Build
+        working-directory: lsp-bridge
+        run: go build ./...
+      - name: Vet
+        working-directory: lsp-bridge
+        run: go vet ./...
+      - name: Test
+        working-directory: lsp-bridge
+        run: go test ./...

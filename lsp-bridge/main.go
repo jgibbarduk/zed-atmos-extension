@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/handler"
-	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/index"
-	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/proxy"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/handler"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/proxy"
 )
 
 func main() {

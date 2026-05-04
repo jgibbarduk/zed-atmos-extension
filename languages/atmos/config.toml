@@ -4,3 +4,4 @@ path_suffixes = ["yaml", "yml"]
 line_comments = ["# "]
 tab_size = 2
 first_line_pattern = "^(import|components|metadata|terraform|helmfile):"
+word_characters = ["-", "_", ".", "/"]

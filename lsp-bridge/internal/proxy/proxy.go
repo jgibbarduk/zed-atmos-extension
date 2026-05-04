@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/lsp"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
 )
 
 type Handler interface {

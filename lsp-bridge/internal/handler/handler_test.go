@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/index"
-	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/lsp"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
 )
 
 // mockDownstream implements DownstreamCaller for tests.
@@ -221,6 +221,95 @@ func TestHandleHover_TemplateExpression(t *testing.T) {
 	}
 	if !strings.Contains(value, "dev_db") {
 		t.Fatalf("expected resolved value 'dev_db' in hover, got: %s", value)
+	}
+}
+
+func TestHandleHover_TemplateExpression_AtmosComponent(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    database:\n      vars:\n        name: '{{ .atmos_component }}'\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	// Hover over the name value line (line 4 in 0-indexed), cursor on the value
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 4, "character": 20},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/hover", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	contents := result["contents"].(map[string]interface{})
+	value := contents["value"].(string)
+	if !strings.Contains(value, "Template:") {
+		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "Resolved:") {
+		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "database") {
+		t.Fatalf("expected resolved value 'database' in hover, got: %s", value)
+	}
+}
+
+func TestHandleHover_ComponentWithAtmosComponentStackName(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\ncomponents:\n  terraform:\n    database:\n      vars:\n        size: large\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+	h.nameTemplate = "{{ .namespace }}-{{ .atmos_component }}"
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 4, "character": 4},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/hover", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	contents := result["contents"].(map[string]interface{})
+	value := contents["value"].(string)
+	if !strings.Contains(value, "Stack name:") {
+		t.Fatalf("expected 'Stack name:' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "dev-database") {
+		t.Fatalf("expected resolved stack name 'dev-database' in hover, got: %s", value)
 	}
 }
 
