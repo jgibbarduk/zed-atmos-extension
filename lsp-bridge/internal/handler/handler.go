@@ -732,6 +732,27 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 		}
 	}
 
+	// Show resolved variables view for terminal stacks
+	if hoverContent == nil && h.nameTemplate != "" && f != nil && len(f.Comps) > 0 {
+		vars := collectVars(f, h.idx)
+		if len(vars) > 0 {
+			value := "**Resolved variables for this stack:**\n\n"
+			keys := make([]string, 0, len(vars))
+			for k := range vars {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				value += fmt.Sprintf("- `%s`: `%s`\n", k, vars[k])
+			}
+			value += "\n*Hover over individual imports to see which file contributed each variable.*"
+			hoverContent = map[string]interface{}{
+				"kind":  "markdown",
+				"value": value,
+			}
+		}
+	}
+
 	if hoverContent == nil {
 		return false, nil, nil, nil
 	}
