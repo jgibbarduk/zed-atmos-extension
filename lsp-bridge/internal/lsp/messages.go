@@ -26,3 +26,19 @@ type Notification struct {
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
+
+type Range struct {
+	StartLine uint32 `json:"startLine"`
+	StartChar uint32 `json:"startChar"`
+	EndLine   uint32 `json:"endLine"`
+	EndChar   uint32 `json:"endChar"`
+}
+
+type WorkspaceEdit struct {
+	Changes map[string][]TextEdit `json:"changes,omitempty"`
+}
+
+type TextEdit struct {
+	Range   Range  `json:"range"`
+	NewText string `json:"newText"`
+}

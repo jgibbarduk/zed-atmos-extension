@@ -89,6 +89,10 @@ func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, 
 		return h.handleHover(content)
 	}
 
+	if method == "textDocument/rename" {
+		return h.handleRename(content)
+	}
+
 	if method == "textDocument/didOpen" || method == "textDocument/didChange" || method == "textDocument/didSave" {
 		return h.handleDiagnostics(content)
 	}
@@ -152,6 +156,7 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 	bridgeCaps := map[string]interface{}{
 		"definitionProvider": true,
 		"referencesProvider": true,
+		"renameProvider":     true,
 		"hoverProvider":      true,
 		"completionProvider": map[string]interface{}{
 			"resolveProvider":   false,
@@ -370,6 +375,113 @@ func (h *LSPHandler) handleReferences(content []byte) (bool, []byte, [][]byte, e
 	}
 
 	resultBytes, _ := json.Marshal(locations)
+	resp := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"result":  json.RawMessage(resultBytes),
+	}
+	b, _ := json.Marshal(resp)
+	return true, b, nil, nil
+}
+
+func (h *LSPHandler) handleRename(content []byte) (bool, []byte, [][]byte, error) {
+	var req struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Params  struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			Position struct {
+				Line      uint32 `json:"line"`
+				Character uint32 `json:"character"`
+			} `json:"position"`
+			NewName string `json:"newName"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(content, &req); err != nil {
+		return true, errorResponse(content, -32602, "Invalid params"), nil, nil
+	}
+
+	path := strings.TrimPrefix(req.Params.TextDocument.URI, "file://")
+	f := h.idx.GetFile(path)
+	if f == nil {
+		return true, emptyResult(content, req.ID), nil, nil
+	}
+
+	var targetComp string
+	for _, comp := range f.Comps {
+		if comp.Range.StartLine <= req.Params.Position.Line && comp.Range.EndLine >= req.Params.Position.Line {
+			targetComp = comp.Name
+			break
+		}
+	}
+	if targetComp == "" {
+		return true, emptyResult(content, req.ID), nil, nil
+	}
+
+	changes := make(map[string][]map[string]interface{})
+
+	for _, sf := range h.idx.AllFiles() {
+		var edits []map[string]interface{}
+
+		for _, comp := range sf.Comps {
+			if comp.Name == targetComp {
+				edits = append(edits, map[string]interface{}{
+					"range": map[string]interface{}{
+						"start": map[string]uint32{"line": comp.Range.StartLine, "character": comp.Range.StartChar},
+						"end":   map[string]uint32{"line": comp.Range.EndLine, "character": comp.Range.EndChar},
+					},
+					"newText": req.Params.NewName,
+				})
+			}
+		}
+
+		for _, meta := range sf.Metadata {
+			if meta.Component == targetComp {
+				edits = append(edits, map[string]interface{}{
+					"range": map[string]interface{}{
+						"start": map[string]uint32{"line": meta.ComponentRange.StartLine, "character": meta.ComponentRange.StartChar},
+						"end":   map[string]uint32{"line": meta.ComponentRange.EndLine, "character": meta.ComponentRange.EndChar},
+					},
+					"newText": req.Params.NewName,
+				})
+			}
+		}
+
+		for _, ts := range sf.TerraformState {
+			if ts.Component == targetComp {
+				edits = append(edits, map[string]interface{}{
+					"range": map[string]interface{}{
+						"start": map[string]uint32{"line": ts.Range.StartLine, "character": ts.Range.StartChar},
+						"end":   map[string]uint32{"line": ts.Range.EndLine, "character": ts.Range.EndChar},
+					},
+					"newText": req.Params.NewName,
+				})
+			}
+		}
+
+		for _, dep := range sf.Deps {
+			if dep.Component == targetComp {
+				edits = append(edits, map[string]interface{}{
+					"range": map[string]interface{}{
+						"start": map[string]uint32{"line": dep.Range.StartLine, "character": dep.Range.StartChar},
+						"end":   map[string]uint32{"line": dep.Range.EndLine, "character": dep.Range.EndChar},
+					},
+					"newText": req.Params.NewName,
+				})
+			}
+		}
+
+		if len(edits) > 0 {
+			changes["file://"+sf.Path] = edits
+		}
+	}
+
+	result := map[string]interface{}{
+		"changes": changes,
+	}
+	resultBytes, _ := json.Marshal(result)
 	resp := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      req.ID,

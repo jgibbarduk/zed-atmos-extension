@@ -382,6 +382,16 @@ func (idx *Index) BasePath() string {
 	return idx.basePath
 }
 
+func (idx *Index) AllFiles() []*StackFile {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	result := make([]*StackFile, 0, len(idx.files))
+	for _, f := range idx.files {
+		result = append(result, deepCopyStackFile(f))
+	}
+	return result
+}
+
 func (idx *Index) Close() {
 	if idx.watcher != nil {
 		idx.watcher.Close()
