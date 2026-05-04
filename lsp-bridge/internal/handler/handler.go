@@ -94,6 +94,10 @@ func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, 
 		return h.handleRename(content)
 	}
 
+	if method == "textDocument/codeAction" {
+		return h.handleCodeAction(content)
+	}
+
 	if method == "textDocument/didOpen" || method == "textDocument/didChange" || method == "textDocument/didSave" {
 		return h.handleDiagnostics(content)
 	}
@@ -159,6 +163,7 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 		"referencesProvider": true,
 		"renameProvider":     true,
 		"hoverProvider":      true,
+		"codeActionProvider": true,
 		"completionProvider": map[string]interface{}{
 			"resolveProvider":   false,
 			"triggerCharacters": []string{".", ":", "/"},
@@ -511,6 +516,76 @@ func (h *LSPHandler) handleRename(content []byte) (bool, []byte, [][]byte, error
 
 	result := lsp.WorkspaceEdit{Changes: editMap}
 	resultBytes, _ := json.Marshal(result)
+	resp := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"result":  json.RawMessage(resultBytes),
+	}
+	b, _ := json.Marshal(resp)
+	return true, b, nil, nil
+}
+
+func (h *LSPHandler) handleCodeAction(content []byte) (bool, []byte, [][]byte, error) {
+	var req struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Params  struct {
+			TextDocument struct {
+				URI string `json:"uri"`
+			} `json:"textDocument"`
+			Range struct {
+				Start struct {
+					Line      uint32 `json:"line"`
+					Character uint32 `json:"character"`
+				} `json:"start"`
+				End struct {
+					Line      uint32 `json:"line"`
+					Character uint32 `json:"character"`
+				} `json:"end"`
+			} `json:"range"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(content, &req); err != nil {
+		return true, errorResponse(content, -32602, "Invalid params"), nil, nil
+	}
+
+	path := strings.TrimPrefix(req.Params.TextDocument.URI, "file://")
+	f := h.idx.GetFile(path)
+	if f == nil {
+		return true, emptyResult(content, req.ID), nil, nil
+	}
+
+	var actions []map[string]interface{}
+
+	// Offer "Generate component scaffold" if cursor is on a component name that doesn't exist in catalog
+	for _, comp := range f.Comps {
+		if comp.Range.StartLine <= req.Params.Range.Start.Line && comp.Range.EndLine >= req.Params.Range.Start.Line {
+			catalogPath := filepath.Join(h.idx.BasePath(), "catalog", comp.Name+".yaml")
+			if _, err := os.Stat(catalogPath); os.IsNotExist(err) {
+				scaffoldContent := fmt.Sprintf("components:\n  terraform:\n    %s:\n      vars: {}\n", comp.Name)
+				actions = append(actions, map[string]interface{}{
+					"title": "Generate component scaffold in catalog",
+					"kind":  "quickfix",
+					"edit": map[string]interface{}{
+						"changes": map[string]interface{}{
+							"file://" + catalogPath: []map[string]interface{}{
+								{
+									"range": map[string]interface{}{
+										"start": map[string]uint32{"line": 0, "character": 0},
+										"end":   map[string]uint32{"line": 0, "character": 0},
+									},
+									"newText": scaffoldContent,
+								},
+							},
+						},
+					},
+				})
+			}
+			break
+		}
+	}
+
+	resultBytes, _ := json.Marshal(actions)
 	resp := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      req.ID,
