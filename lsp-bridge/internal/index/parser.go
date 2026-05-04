@@ -40,7 +40,7 @@ func parseYAMLFile(path string) (*StackFile, error) {
 		}
 
 		if keyStr == "vars" && val != nil {
-			extractVars(val, sf, keyStr)
+			extractVars(val, sf)
 		}
 
 		if keyStr == "components" && val != nil && val.Kind == yaml.MappingNode {
@@ -55,6 +55,9 @@ func parseYAMLFile(path string) (*StackFile, error) {
 
 func nodeRange(n *yaml.Node) Range {
 	if n == nil {
+		return Range{}
+	}
+	if n.Line == 0 || n.Column == 0 {
 		return Range{}
 	}
 	return Range{
@@ -73,12 +76,7 @@ func extractImports(node *yaml.Node) []ImportNode {
 			if item.Kind == yaml.ScalarNode {
 				imports = append(imports, ImportNode{
 					RawPath: item.Value,
-					Range: Range{
-						StartLine: uint32(item.Line - 1),
-						StartChar: uint32(item.Column - 1),
-						EndLine:   uint32(item.Line - 1),
-						EndChar:   uint32(item.Column - 1 + len(item.Value)),
-					},
+					Range:   nodeRange(item),
 				})
 			}
 		}
@@ -111,13 +109,8 @@ func extractComponents(node *yaml.Node, sf *StackFile) {
 			}
 
 			sf.Comps = append(sf.Comps, CompNode{
-				Name: compName,
-				Range: Range{
-					StartLine: uint32(compKey.Line - 1),
-					StartChar: uint32(compKey.Column - 1),
-					EndLine:   uint32(compKey.Line - 1),
-					EndChar:   uint32(compKey.Column - 1 + len(compName)),
-				},
+				Name:  compName,
+				Range: nodeRange(compKey),
 			})
 
 			if compTypeVal != nil && j+1 < len(compTypeVal.Content) {
@@ -129,7 +122,7 @@ func extractComponents(node *yaml.Node, sf *StackFile) {
 						cvKey := compVal.Content[k]
 						cvVal := compVal.Content[k+1]
 						if cvKey.Value == "vars" {
-							extractVars(cvVal, sf, cvKey.Value)
+							extractVars(cvVal, sf)
 						}
 					}
 				}
@@ -229,7 +222,7 @@ func extractTerraformStateTags(node *yaml.Node, sf *StackFile) {
 	}
 }
 
-func extractVars(node *yaml.Node, sf *StackFile, key string) {
+func extractVars(node *yaml.Node, sf *StackFile) {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return
 	}

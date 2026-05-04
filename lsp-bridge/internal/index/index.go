@@ -68,22 +68,22 @@ type StackFile struct {
 
 type Index struct {
 	mu          sync.RWMutex
-	Files       map[string]*StackFile
-	ByImport    map[string][]string
-	ByComponent map[string][]string
-	ByInherit   map[string][]string
-	BasePath    string
+	files       map[string]*StackFile
+	byImport    map[string][]string
+	byComponent map[string][]string
+	byInherit   map[string][]string
+	basePath    string
 	watcher     *fsnotify.Watcher
 	onChange    func()
 }
 
 func New(basePath string) (*Index, error) {
 	return &Index{
-		Files:       make(map[string]*StackFile),
-		ByImport:    make(map[string][]string),
-		ByComponent: make(map[string][]string),
-		ByInherit:   make(map[string][]string),
-		BasePath:    basePath,
+		files:       make(map[string]*StackFile),
+		byImport:    make(map[string][]string),
+		byComponent: make(map[string][]string),
+		byInherit:   make(map[string][]string),
+		basePath:    basePath,
 	}, nil
 }
 
@@ -94,6 +94,7 @@ func (idx *Index) StartWatching(onChange func()) error {
 	}
 	idx.watcher = w
 	idx.onChange = onChange
+	cb := onChange
 
 	go func() {
 		debounce := time.NewTimer(0)
@@ -112,8 +113,8 @@ func (idx *Index) StartWatching(onChange func()) error {
 					debounce.Reset(200 * time.Millisecond)
 				}
 			case <-debounce.C:
-				if idx.onChange != nil {
-					idx.onChange()
+				if cb != nil {
+					cb()
 				}
 			case err, ok := <-w.Errors:
 				if !ok {
@@ -124,7 +125,7 @@ func (idx *Index) StartWatching(onChange func()) error {
 		}
 	}()
 
-	return filepath.Walk(idx.BasePath, func(path string, info os.FileInfo, err error) error {
+	return filepath.Walk(idx.basePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -136,18 +137,18 @@ func (idx *Index) StartWatching(onChange func()) error {
 }
 
 func (idx *Index) Reindex() {
-	if idx.BasePath == "" {
+	if idx.basePath == "" {
 		return
 	}
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	idx.Files = make(map[string]*StackFile)
-	idx.ByImport = make(map[string][]string)
-	idx.ByComponent = make(map[string][]string)
-	idx.ByInherit = make(map[string][]string)
+	idx.files = make(map[string]*StackFile)
+	idx.byImport = make(map[string][]string)
+	idx.byComponent = make(map[string][]string)
+	idx.byInherit = make(map[string][]string)
 
-	filepath.Walk(idx.BasePath, func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(idx.basePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -165,19 +166,19 @@ func (idx *Index) Reindex() {
 		if sf == nil {
 			sf = &StackFile{Path: path}
 		}
-		idx.Files[path] = sf
+		idx.files[path] = sf
 		for _, imp := range sf.Imports {
-			idx.ByImport[imp.RawPath] = append(idx.ByImport[imp.RawPath], path)
+			idx.byImport[imp.RawPath] = append(idx.byImport[imp.RawPath], path)
 		}
 		for _, comp := range sf.Comps {
-			idx.ByComponent[comp.Name] = append(idx.ByComponent[comp.Name], path)
+			idx.byComponent[comp.Name] = append(idx.byComponent[comp.Name], path)
 		}
 		for _, meta := range sf.Metadata {
 			if meta.Component != "" {
-				idx.ByComponent[meta.Component] = append(idx.ByComponent[meta.Component], path)
+				idx.byComponent[meta.Component] = append(idx.byComponent[meta.Component], path)
 			}
 			if meta.Inherits != "" {
-				idx.ByInherit[meta.Inherits] = append(idx.ByInherit[meta.Inherits], path)
+				idx.byInherit[meta.Inherits] = append(idx.byInherit[meta.Inherits], path)
 			}
 		}
 		return nil
@@ -187,20 +188,18 @@ func (idx *Index) Reindex() {
 func (idx *Index) GetFile(path string) *StackFile {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return idx.Files[path]
+	return idx.files[path]
 }
 
 func (idx *Index) FindComponent(name string) []StackFile {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
+	paths := idx.byComponent[name]
 	var results []StackFile
-	for _, f := range idx.Files {
-		for _, c := range f.Comps {
-			if c.Name == name {
-				results = append(results, *f)
-				break
-			}
+	for _, p := range paths {
+		if f, ok := idx.files[p]; ok {
+			results = append(results, *f)
 		}
 	}
 	return results
@@ -211,15 +210,15 @@ func (idx *Index) ResolveImport(rawPath string, fromDir string) []string {
 	defer idx.mu.RUnlock()
 
 	candidates := []string{
-		filepath.Join(idx.BasePath, rawPath+".yaml"),
-		filepath.Join(idx.BasePath, rawPath+".yml"),
+		filepath.Join(idx.basePath, rawPath+".yaml"),
+		filepath.Join(idx.basePath, rawPath+".yml"),
 		filepath.Join(fromDir, rawPath+".yaml"),
 		filepath.Join(fromDir, rawPath+".yml"),
 	}
 
 	var resolved []string
 	for _, c := range candidates {
-		if _, ok := idx.Files[c]; ok {
+		if _, ok := idx.files[c]; ok {
 			resolved = append(resolved, c)
 		}
 	}
@@ -229,14 +228,29 @@ func (idx *Index) ResolveImport(rawPath string, fromDir string) []string {
 func (idx *Index) FindImporters(rawPath string) []string {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return idx.ByImport[rawPath]
+	paths := idx.byImport[rawPath]
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, len(paths))
+	copy(out, paths)
+	return out
+}
+
+func removePath(slice []string, target string) ([]string, bool) {
+	for i, p := range slice {
+		if p == target {
+			return append(slice[:i], slice[i+1:]...), true
+		}
+	}
+	return slice, false
 }
 
 func (idx *Index) ReindexFile(path string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	oldFile, existed := idx.Files[path]
+	oldFile, existed := idx.files[path]
 
 	sf, err := parseYAMLFile(path)
 	if err != nil {
@@ -248,70 +262,58 @@ func (idx *Index) ReindexFile(path string) {
 
 	if existed && oldFile != nil {
 		for _, old := range oldFile.Imports {
-			oldImporters := idx.ByImport[old.RawPath]
-			for i, p := range oldImporters {
-				if p == path {
-					idx.ByImport[old.RawPath] = append(oldImporters[:i], oldImporters[i+1:]...)
-					break
+			if updated, ok := removePath(idx.byImport[old.RawPath], path); ok {
+				if len(updated) == 0 {
+					delete(idx.byImport, old.RawPath)
+				} else {
+					idx.byImport[old.RawPath] = updated
 				}
-			}
-			if len(idx.ByImport[old.RawPath]) == 0 {
-				delete(idx.ByImport, old.RawPath)
 			}
 		}
 		for _, old := range oldFile.Comps {
-			oldFiles := idx.ByComponent[old.Name]
-			for i, p := range oldFiles {
-				if p == path {
-					idx.ByComponent[old.Name] = append(oldFiles[:i], oldFiles[i+1:]...)
-					break
+			if updated, ok := removePath(idx.byComponent[old.Name], path); ok {
+				if len(updated) == 0 {
+					delete(idx.byComponent, old.Name)
+				} else {
+					idx.byComponent[old.Name] = updated
 				}
-			}
-			if len(idx.ByComponent[old.Name]) == 0 {
-				delete(idx.ByComponent, old.Name)
 			}
 		}
 		for _, old := range oldFile.Metadata {
 			if old.Component != "" {
-				oldFiles := idx.ByComponent[old.Component]
-				for i, p := range oldFiles {
-					if p == path {
-						idx.ByComponent[old.Component] = append(oldFiles[:i], oldFiles[i+1:]...)
-						break
+				if updated, ok := removePath(idx.byComponent[old.Component], path); ok {
+					if len(updated) == 0 {
+						delete(idx.byComponent, old.Component)
+					} else {
+						idx.byComponent[old.Component] = updated
 					}
-				}
-				if len(idx.ByComponent[old.Component]) == 0 {
-					delete(idx.ByComponent, old.Component)
 				}
 			}
 			if old.Inherits != "" {
-				oldFiles := idx.ByInherit[old.Inherits]
-				for i, p := range oldFiles {
-					if p == path {
-						idx.ByInherit[old.Inherits] = append(oldFiles[:i], oldFiles[i+1:]...)
-						break
+				if updated, ok := removePath(idx.byInherit[old.Inherits], path); ok {
+					if len(updated) == 0 {
+						delete(idx.byInherit, old.Inherits)
+					} else {
+						idx.byInherit[old.Inherits] = updated
 					}
-				}
-				if len(idx.ByInherit[old.Inherits]) == 0 {
-					delete(idx.ByInherit, old.Inherits)
 				}
 			}
 		}
 	}
 
-	idx.Files[path] = sf
+	idx.files[path] = sf
 	for _, imp := range sf.Imports {
-		idx.ByImport[imp.RawPath] = append(idx.ByImport[imp.RawPath], path)
+		idx.byImport[imp.RawPath] = append(idx.byImport[imp.RawPath], path)
 	}
 	for _, comp := range sf.Comps {
-		idx.ByComponent[comp.Name] = append(idx.ByComponent[comp.Name], path)
+		idx.byComponent[comp.Name] = append(idx.byComponent[comp.Name], path)
 	}
 	for _, meta := range sf.Metadata {
 		if meta.Component != "" {
-			idx.ByComponent[meta.Component] = append(idx.ByComponent[meta.Component], path)
+			idx.byComponent[meta.Component] = append(idx.byComponent[meta.Component], path)
 		}
 		if meta.Inherits != "" {
-			idx.ByInherit[meta.Inherits] = append(idx.ByInherit[meta.Inherits], path)
+			idx.byInherit[meta.Inherits] = append(idx.byInherit[meta.Inherits], path)
 		}
 	}
 }
@@ -319,7 +321,13 @@ func (idx *Index) ReindexFile(path string) {
 func (idx *Index) SetBasePath(path string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	idx.BasePath = path
+	idx.basePath = path
+}
+
+func (idx *Index) BasePath() string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.basePath
 }
 
 func (idx *Index) Close() {

@@ -27,10 +27,10 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 
 	// Check 1: No _defaults.yaml ancestor
 	defaultsPath := filepath.Join(dir, "_defaults.yaml")
-	if _, ok := idx.Files[defaultsPath]; !ok && filename != "_defaults.yaml" {
+	if idx.GetFile(defaultsPath) == nil && filename != "_defaults.yaml" {
 		parentDir := filepath.Dir(dir)
 		parentDefaults := filepath.Join(parentDir, "_defaults.yaml")
-		if _, ok2 := idx.Files[parentDefaults]; !ok2 {
+		if idx.GetFile(parentDefaults) == nil {
 			diags = append(diags, Diagnostic{
 				Severity: SeverityHint,
 				Message:  "Consider adding a `_defaults.yaml` at this level for shared settings",
@@ -60,7 +60,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 		if !strings.Contains(dir, "catalog") {
 			diags = append(diags, Diagnostic{
 				Severity: SeverityHint,
-				Message:  "Consider using a catalog (" + filepath.Join(idx.BasePath, "catalog") + ") for reusable component blueprints",
+				Message:  "Consider using a catalog (" + filepath.Join(idx.BasePath(), "catalog") + ") for reusable component blueprints",
 				Range:    comp.Range,
 				Source:   "atmos-best-practice",
 			})
