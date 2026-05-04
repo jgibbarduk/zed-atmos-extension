@@ -93,5 +93,20 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 		}
 	}
 
+	// Check 6: Abstract component deployability warning
+	for _, meta := range file.Metadata {
+		if meta.Type == "abstract" && meta.Component != "" {
+			inheritors := idx.FindInheritors(meta.Component)
+			if len(inheritors) == 0 {
+				diags = append(diags, Diagnostic{
+					Severity: SeverityWarning,
+					Message:  fmt.Sprintf("Abstract component '%s' has no inheritors", meta.Component),
+					Range:    meta.Range,
+					Source:   "atmos-abstract",
+				})
+			}
+		}
+	}
+
 	return diags
 }

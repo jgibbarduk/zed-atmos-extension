@@ -277,6 +277,18 @@ func (idx *Index) FindImporters(rawPath string) []string {
 	return out
 }
 
+func (idx *Index) FindInheritors(name string) []string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	paths := idx.byInherit[name]
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, len(paths))
+	copy(out, paths)
+	return out
+}
+
 func removePath(slice []string, target string) ([]string, bool) {
 	for i, p := range slice {
 		if p == target {
