@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/index"
@@ -407,13 +408,17 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 				} else {
 					value += "*Unable to resolve path*"
 				}
+				var importVars []index.VarNode
 				for _, r := range resolved {
 					parent := h.idx.GetFile(r)
-					if parent != nil && len(parent.Vars) > 0 {
-						value += "\n**Vars from this import:**\n"
-						for _, v := range parent.Vars {
-							value += fmt.Sprintf("- `%s`: `%s`\n", v.Key, v.Value)
-						}
+					if parent != nil {
+						importVars = append(importVars, parent.Vars...)
+					}
+				}
+				if len(importVars) > 0 {
+					value += "\n**Vars from this import:**\n"
+					for _, v := range importVars {
+						value += fmt.Sprintf("- `%s`: `%s`\n", v.Key, v.Value)
 					}
 				}
 				hoverContent = map[string]interface{}{
@@ -426,11 +431,11 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 		if hoverContent == nil {
 			for _, comp := range f.Comps {
 				if comp.Range.StartLine <= req.Params.Position.Line && comp.Range.EndLine >= req.Params.Position.Line {
-					inheritors := h.idx.FindComponent(comp.Name)
+					definitions := h.idx.FindComponent(comp.Name)
 					value := fmt.Sprintf("**Component:** `%s`\n\n", comp.Name)
-					if len(inheritors) > 1 {
+					if len(definitions) > 1 {
 						value += "**Also defined in:**\n"
-						for _, sf := range inheritors {
+						for _, sf := range definitions {
 							if sf.Path != path {
 								rel, err := filepath.Rel(h.projectRoot, sf.Path)
 								if err != nil {
@@ -443,9 +448,14 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 					// Show accumulated vars for this component
 					vars := collectVars(f, h.idx)
 					if len(vars) > 0 {
+						keys := make([]string, 0, len(vars))
+						for k := range vars {
+							keys = append(keys, k)
+						}
+						sort.Strings(keys)
 						value += "\n**Accumulated vars:**\n"
-						for k, v := range vars {
-							value += fmt.Sprintf("- `%s`: `%s`\n", k, v)
+						for _, k := range keys {
+							value += fmt.Sprintf("- `%s`: `%s`\n", k, vars[k])
 						}
 					}
 					hoverContent = map[string]interface{}{
