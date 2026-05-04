@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -40,6 +41,19 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 		}
 	}
 
+	// Check 4: Unresolvable imports
+	for _, imp := range file.Imports {
+		resolved := idx.ResolveImport(imp.RawPath, dir)
+		if len(resolved) == 0 {
+			diags = append(diags, Diagnostic{
+				Severity: SeverityError,
+				Message:  fmt.Sprintf("Import '%s' cannot be resolved", imp.RawPath),
+				Range:    imp.Range,
+				Source:   "atmos-import",
+			})
+		}
+	}
+
 	// Check 2: Import order — check for overrides imported before base
 	if len(file.Imports) > 1 {
 		for i, imp := range file.Imports {
@@ -52,6 +66,18 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 					Source:   "atmos-best-practice",
 				})
 			}
+		}
+	}
+
+	// Check 5: Unquoted version values
+	for _, v := range file.Vars {
+		if strings.Contains(strings.ToLower(v.Key), "version") && !v.IsQuoted {
+			diags = append(diags, Diagnostic{
+				Severity: SeverityWarning,
+				Message:  fmt.Sprintf("Version '%s' should be quoted to prevent YAML float parsing", v.Value),
+				Range:    v.Range,
+				Source:   "atmos-version",
+			})
 		}
 	}
 
