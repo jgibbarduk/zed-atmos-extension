@@ -559,10 +559,16 @@ func (h *LSPHandler) handleCodeAction(content []byte) (bool, []byte, [][]byte, e
 
 	// Offer "Generate component scaffold" if cursor is on a component name that doesn't exist in catalog
 	for _, comp := range f.Comps {
+		if comp.Name == "" {
+			continue
+		}
+		if strings.ContainsAny(comp.Name, "/\\") {
+			continue
+		}
 		if comp.Range.StartLine <= req.Params.Range.Start.Line && comp.Range.EndLine >= req.Params.Range.Start.Line {
 			catalogPath := filepath.Join(h.idx.BasePath(), "catalog", comp.Name+".yaml")
 			if _, err := os.Stat(catalogPath); os.IsNotExist(err) {
-				scaffoldContent := fmt.Sprintf("components:\n  terraform:\n    %s:\n      vars: {}\n", comp.Name)
+				scaffoldContent := fmt.Sprintf("components:\n  terraform:\n    \"%s\":\n      vars: {}\n", comp.Name)
 				actions = append(actions, map[string]interface{}{
 					"title": "Generate component scaffold in catalog",
 					"kind":  "quickfix",
