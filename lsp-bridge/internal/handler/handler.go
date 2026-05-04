@@ -302,6 +302,22 @@ func (h *LSPHandler) handleDefinition(content []byte) (bool, []byte, [][]byte, e
 		}
 	}
 
+	// Check if cursor is on a component name key
+	for _, comp := range f.Comps {
+		if comp.Range.StartLine <= req.Params.Position.Line && comp.Range.EndLine >= req.Params.Position.Line {
+			refs := h.idx.FindComponent(comp.Name)
+			for _, ref := range refs {
+				locations = append(locations, map[string]interface{}{
+					"uri": "file://" + ref.Path,
+					"range": map[string]interface{}{
+						"start": map[string]uint32{"line": 0, "character": 0},
+						"end":   map[string]uint32{"line": 0, "character": 0},
+					},
+				})
+			}
+		}
+	}
+
 	if locations == nil {
 		locations = []map[string]interface{}{}
 	}
@@ -683,11 +699,34 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 							value += fmt.Sprintf("- `%s`: `%s`\n", k, vars[k])
 						}
 					}
+					if h.nameTemplate != "" {
+						preview := interpolateNameTemplate(h.nameTemplate, vars)
+						if preview != "" {
+							value += fmt.Sprintf("\n\n**Stack name:** `%s`\n\nComputed from `atmos.yaml` `name_template` with accumulated vars.", preview)
+						}
+					}
 					hoverContent = map[string]interface{}{
 						"kind":  "markdown",
 						"value": value,
 					}
 					break
+				}
+			}
+		}
+		if hoverContent == nil {
+			for _, v := range f.Vars {
+				if v.Range.StartLine <= req.Params.Position.Line && v.Range.EndLine >= req.Params.Position.Line {
+					if strings.Contains(v.Value, "{{") && strings.Contains(v.Value, "}}") {
+						_, resolved := findTemplateExpressionAtPosition(f, req.Params.Position.Line, req.Params.Position.Character)
+						if resolved != "" && resolved != v.Value {
+							value := fmt.Sprintf("**Template:** `%s`\n\n**Resolved:** `%s`", v.Value, resolved)
+							hoverContent = map[string]interface{}{
+								"kind":  "markdown",
+								"value": value,
+							}
+							break
+						}
+					}
 				}
 			}
 		}
@@ -717,16 +756,6 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 						"value": value,
 					}
 					break
-				}
-			}
-		}
-		if hoverContent == nil && h.nameTemplate != "" && len(f.Comps) > 0 {
-			vars := collectVars(f, h.idx)
-			preview := interpolateNameTemplate(h.nameTemplate, vars)
-			if preview != "" {
-				hoverContent = map[string]interface{}{
-					"kind":  "markdown",
-					"value": fmt.Sprintf("**Stack name:** `%s`\n\nComputed from `atmos.yaml` `name_template` with accumulated vars.", preview),
 				}
 			}
 		}
@@ -894,6 +923,44 @@ func interpolateNameTemplate(tpl string, vars map[string]string) string {
 
 	result = nameTemplateRemRe.ReplaceAllString(result, "")
 	return strings.TrimSpace(result)
+}
+
+var templateVarExprRe = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
+
+func findTemplateExpressionAtPosition(sf *index.StackFile, line uint32, char uint32) (expr string, resolved string) {
+	for _, v := range sf.Vars {
+		if v.Range.StartLine == line && v.Range.StartChar <= char && v.Range.EndChar >= char {
+			expr = v.Value
+			break
+		}
+	}
+	if expr == "" {
+		return "", ""
+	}
+	resolved = expr
+	resolved = templateVarExprRe.ReplaceAllStringFunc(resolved, func(m string) string {
+		subs := templateVarExprRe.FindStringSubmatch(m)
+		if len(subs) > 1 {
+			vars := collectVars(sf, nil)
+			if v, ok := vars[subs[1]]; ok {
+				return v
+			}
+		}
+		return m
+	})
+	if strings.Contains(expr, "{{ .atmos_component }}") {
+		compName := ""
+		for _, comp := range sf.Comps {
+			if comp.Range.StartLine == line || comp.Range.StartLine == line-1 || comp.Range.StartLine == line+1 {
+				compName = comp.Name
+				break
+			}
+		}
+		if compName != "" {
+			resolved = strings.ReplaceAll(resolved, "{{ .atmos_component }}", compName)
+		}
+	}
+	return expr, resolved
 }
 
 func collectVars(sf *index.StackFile, idx *index.Index) map[string]string {

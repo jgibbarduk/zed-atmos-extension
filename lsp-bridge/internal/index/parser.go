@@ -60,11 +60,17 @@ func nodeRange(n *yaml.Node) Range {
 	if n.Line == 0 || n.Column == 0 {
 		return Range{}
 	}
+	length := len(n.Value)
+	if n.Style == yaml.DoubleQuotedStyle {
+		length += 2
+	} else if n.Style == yaml.SingleQuotedStyle {
+		length += 2
+	}
 	return Range{
 		StartLine: uint32(n.Line - 1),
 		StartChar: uint32(n.Column - 1),
 		EndLine:   uint32(n.Line - 1),
-		EndChar:   uint32(n.Column - 1 + len(n.Value)),
+		EndChar:   uint32(n.Column - 1 + length),
 	}
 }
 
