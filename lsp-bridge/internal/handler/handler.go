@@ -723,15 +723,32 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			for _, v := range f.Vars {
 				if v.Range.StartLine <= req.Params.Position.Line && v.Range.EndLine >= req.Params.Position.Line {
 					if strings.Contains(v.Value, "{{") && strings.Contains(v.Value, "}}") {
-						_, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character)
-						if resolved != "" && resolved != v.Value {
-							value := fmt.Sprintf("**Template:** `%s`\n\n**Resolved:** `%s`", v.Value, resolved)
+						expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character)
+						if expr != "" {
+							value := fmt.Sprintf("**Template:** `%s`", expr)
+							if resolved != "" && resolved != expr {
+								value += fmt.Sprintf("\n\n**Resolved:** `%s`", resolved)
+							}
 							hoverContent = map[string]interface{}{
 								"kind":  "markdown",
 								"value": value,
 							}
 							break
 						}
+					}
+				}
+			}
+			// Fallback: template expressions outside of vars: blocks
+			if hoverContent == nil {
+				expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character)
+				if expr != "" {
+					value := fmt.Sprintf("**Template:** `%s`", expr)
+					if resolved != "" && resolved != expr {
+						value += fmt.Sprintf("\n\n**Resolved:** `%s`", resolved)
+					}
+					hoverContent = map[string]interface{}{
+						"kind":  "markdown",
+						"value": value,
 					}
 				}
 			}
@@ -935,17 +952,35 @@ func interpolateNameTemplate(tpl string, vars map[string]string, componentName s
 }
 
 var templateVarExprRe = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
+var templateExprRe = regexp.MustCompile(`{{\s*[^}]+\s*}}`)
 
 func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, line uint32, char uint32) (expr string, resolved string) {
+	// 1. Try matching a VarNode (vars: block)
 	for _, v := range sf.Vars {
 		if v.Range.StartLine == line && v.Range.StartChar <= char && v.Range.EndChar >= char {
 			expr = v.Value
 			break
 		}
 	}
+
+	// 2. Fallback: read the raw file and extract template expressions from the line
 	if expr == "" {
-		return "", ""
+		content, err := os.ReadFile(sf.Path)
+		if err != nil {
+			return "", ""
+		}
+		lines := strings.Split(string(content), "\n")
+		if int(line) >= len(lines) {
+			return "", ""
+		}
+		lineText := lines[line]
+		matches := templateExprRe.FindAllString(lineText, -1)
+		if len(matches) == 0 {
+			return "", ""
+		}
+		expr = strings.Join(matches, "")
 	}
+
 	resolved = expr
 	vars := collectVars(sf, idx)
 	resolved = templateVarExprRe.ReplaceAllStringFunc(resolved, func(m string) string {
@@ -957,19 +992,42 @@ func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, lin
 		}
 		return m
 	})
+
 	if strings.Contains(expr, "{{ .atmos_component }}") {
 		compName := ""
+		// First try: was this a VarNode inside a component?
 		for _, v := range sf.Vars {
 			if v.Range.StartLine == line && v.Range.StartChar <= char && v.Range.EndChar >= char {
 				compName = v.Component
 				break
 			}
 		}
+		// Fallback: search backward for the nearest component context
+		if compName == "" {
+			compName = findComponentForLine(sf, line)
+		}
 		if compName != "" {
 			resolved = strings.ReplaceAll(resolved, "{{ .atmos_component }}", compName)
 		}
 	}
+
 	return expr, resolved
+}
+
+func findComponentForLine(sf *index.StackFile, line uint32) string {
+	if len(sf.Comps) == 0 {
+		return ""
+	}
+	// Find the component whose StartLine is closest to but <= line
+	best := ""
+	bestLine := uint32(0)
+	for _, comp := range sf.Comps {
+		if comp.Range.StartLine <= line && comp.Range.StartLine >= bestLine {
+			best = comp.Name
+			bestLine = comp.Range.StartLine
+		}
+	}
+	return best
 }
 
 func collectVars(sf *index.StackFile, idx *index.Index) map[string]string {

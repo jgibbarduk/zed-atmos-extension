@@ -313,6 +313,49 @@ func TestHandleHover_ComponentWithAtmosComponentStackName(t *testing.T) {
 	}
 }
 
+func TestHandleHover_TemplateExpression_NonVarsBlock(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/mixins/atmos-pro/default.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("drift-detection-wf-config: &drift-detection-wf-config\n  atmos-terraform-plan.yaml:\n    inputs:\n      component: \"{{ .atmos_component }}\"\n      stack: \"{{ .atmos_stack }}\"\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	// Hover over line 3 (0-indexed) — component: "{{ .atmos_component }}"
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 3, "character": 20},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/hover", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	contents := result["contents"].(map[string]interface{})
+	value := contents["value"].(string)
+	if !strings.Contains(value, "Template:") {
+		t.Fatalf("expected 'Template:' in hover for non-vars block expression, got: %s", value)
+	}
+	if !strings.Contains(value, "{{ .atmos_component }}") {
+		t.Fatalf("expected template expression in hover, got: %s", value)
+	}
+}
+
 func TestHandleRename_ComponentKey(t *testing.T) {
 	dir := t.TempDir()
 	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
