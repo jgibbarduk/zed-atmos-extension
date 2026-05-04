@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/index"
+	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/lsp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -384,6 +385,13 @@ func (h *LSPHandler) handleReferences(content []byte) (bool, []byte, [][]byte, e
 	return true, b, nil, nil
 }
 
+func toLSPRange(r index.Range) lsp.Range {
+	return lsp.Range{
+		Start: lsp.Position{Line: r.StartLine, Character: r.StartChar},
+		End:   lsp.Position{Line: r.EndLine, Character: r.EndChar},
+	}
+}
+
 func (h *LSPHandler) handleRename(content []byte) (bool, []byte, [][]byte, error) {
 	var req struct {
 		JSONRPC string          `json:"jsonrpc"`
@@ -409,78 +417,99 @@ func (h *LSPHandler) handleRename(content []byte) (bool, []byte, [][]byte, error
 		return true, emptyResult(content, req.ID), nil, nil
 	}
 
+	pos := req.Params.Position.Line
 	var targetComp string
 	for _, comp := range f.Comps {
-		if comp.Range.StartLine <= req.Params.Position.Line && comp.Range.EndLine >= req.Params.Position.Line {
+		if comp.Range.StartLine <= pos && comp.Range.EndLine >= pos {
 			targetComp = comp.Name
 			break
+		}
+	}
+	if targetComp == "" {
+		for _, meta := range f.Metadata {
+			if meta.Component != "" && meta.ComponentRange.StartLine <= pos && meta.ComponentRange.EndLine >= pos {
+				targetComp = meta.Component
+				break
+			}
+			if meta.Inherits != "" && meta.InheritsRange.StartLine <= pos && meta.InheritsRange.EndLine >= pos {
+				targetComp = meta.Inherits
+				break
+			}
+		}
+	}
+	if targetComp == "" {
+		for _, ts := range f.TerraformState {
+			if ts.Component != "" && ts.Range.StartLine <= pos && ts.Range.EndLine >= pos {
+				targetComp = ts.Component
+				break
+			}
+		}
+	}
+	if targetComp == "" {
+		for _, dep := range f.Deps {
+			if dep.Component != "" && dep.Range.StartLine <= pos && dep.Range.EndLine >= pos {
+				targetComp = dep.Component
+				break
+			}
 		}
 	}
 	if targetComp == "" {
 		return true, emptyResult(content, req.ID), nil, nil
 	}
 
-	changes := make(map[string][]map[string]interface{})
+	editMap := make(map[string][]lsp.TextEdit)
 
 	for _, sf := range h.idx.AllFiles() {
-		var edits []map[string]interface{}
+		var edits []lsp.TextEdit
 
 		for _, comp := range sf.Comps {
 			if comp.Name == targetComp {
-				edits = append(edits, map[string]interface{}{
-					"range": map[string]interface{}{
-						"start": map[string]uint32{"line": comp.Range.StartLine, "character": comp.Range.StartChar},
-						"end":   map[string]uint32{"line": comp.Range.EndLine, "character": comp.Range.EndChar},
-					},
-					"newText": req.Params.NewName,
+				edits = append(edits, lsp.TextEdit{
+					Range:   toLSPRange(comp.Range),
+					NewText: req.Params.NewName,
 				})
 			}
 		}
 
 		for _, meta := range sf.Metadata {
 			if meta.Component == targetComp {
-				edits = append(edits, map[string]interface{}{
-					"range": map[string]interface{}{
-						"start": map[string]uint32{"line": meta.ComponentRange.StartLine, "character": meta.ComponentRange.StartChar},
-						"end":   map[string]uint32{"line": meta.ComponentRange.EndLine, "character": meta.ComponentRange.EndChar},
-					},
-					"newText": req.Params.NewName,
+				edits = append(edits, lsp.TextEdit{
+					Range:   toLSPRange(meta.ComponentRange),
+					NewText: req.Params.NewName,
+				})
+			}
+			if meta.Inherits == targetComp {
+				edits = append(edits, lsp.TextEdit{
+					Range:   toLSPRange(meta.InheritsRange),
+					NewText: req.Params.NewName,
 				})
 			}
 		}
 
 		for _, ts := range sf.TerraformState {
 			if ts.Component == targetComp {
-				edits = append(edits, map[string]interface{}{
-					"range": map[string]interface{}{
-						"start": map[string]uint32{"line": ts.Range.StartLine, "character": ts.Range.StartChar},
-						"end":   map[string]uint32{"line": ts.Range.EndLine, "character": ts.Range.EndChar},
-					},
-					"newText": req.Params.NewName,
+				edits = append(edits, lsp.TextEdit{
+					Range:   toLSPRange(ts.Range),
+					NewText: req.Params.NewName,
 				})
 			}
 		}
 
 		for _, dep := range sf.Deps {
 			if dep.Component == targetComp {
-				edits = append(edits, map[string]interface{}{
-					"range": map[string]interface{}{
-						"start": map[string]uint32{"line": dep.Range.StartLine, "character": dep.Range.StartChar},
-						"end":   map[string]uint32{"line": dep.Range.EndLine, "character": dep.Range.EndChar},
-					},
-					"newText": req.Params.NewName,
+				edits = append(edits, lsp.TextEdit{
+					Range:   toLSPRange(dep.Range),
+					NewText: req.Params.NewName,
 				})
 			}
 		}
 
 		if len(edits) > 0 {
-			changes["file://"+sf.Path] = edits
+			editMap["file://"+sf.Path] = edits
 		}
 	}
 
-	result := map[string]interface{}{
-		"changes": changes,
-	}
+	result := lsp.WorkspaceEdit{Changes: editMap}
 	resultBytes, _ := json.Marshal(result)
 	resp := map[string]interface{}{
 		"jsonrpc": "2.0",

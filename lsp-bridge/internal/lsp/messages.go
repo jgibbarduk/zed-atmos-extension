@@ -27,18 +27,21 @@ type Notification struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
-type Range struct {
-	StartLine uint32 `json:"startLine"`
-	StartChar uint32 `json:"startChar"`
-	EndLine   uint32 `json:"endLine"`
-	EndChar   uint32 `json:"endChar"`
+type Position struct {
+	Line      uint32 `json:"line"`
+	Character uint32 `json:"character"`
 }
 
-type WorkspaceEdit struct {
-	Changes map[string][]TextEdit `json:"changes,omitempty"`
+type Range struct {
+	Start Position `json:"start"`
+	End   Position `json:"end"`
 }
 
 type TextEdit struct {
 	Range   Range  `json:"range"`
 	NewText string `json:"newText"`
+}
+
+type WorkspaceEdit struct {
+	Changes map[string][]TextEdit `json:"changes,omitempty"`
 }
