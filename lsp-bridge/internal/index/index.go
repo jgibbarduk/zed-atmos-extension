@@ -185,10 +185,50 @@ func (idx *Index) Reindex() {
 	})
 }
 
+func deepCopyStackFile(sf *StackFile) *StackFile {
+	if sf == nil {
+		return nil
+	}
+	out := &StackFile{
+		Path: sf.Path,
+	}
+	if len(sf.Imports) > 0 {
+		out.Imports = make([]ImportNode, len(sf.Imports))
+		for i, imp := range sf.Imports {
+			out.Imports[i] = ImportNode{
+				RawPath:  imp.RawPath,
+				Range:   imp.Range,
+				Resolves: append([]string(nil), imp.Resolves...),
+			}
+		}
+	}
+	if len(sf.Comps) > 0 {
+		out.Comps = make([]CompNode, len(sf.Comps))
+		copy(out.Comps, sf.Comps)
+	}
+	if len(sf.Metadata) > 0 {
+		out.Metadata = make([]MetadataNode, len(sf.Metadata))
+		copy(out.Metadata, sf.Metadata)
+	}
+	if len(sf.Vars) > 0 {
+		out.Vars = make([]VarNode, len(sf.Vars))
+		copy(out.Vars, sf.Vars)
+	}
+	if len(sf.Deps) > 0 {
+		out.Deps = make([]DepNode, len(sf.Deps))
+		copy(out.Deps, sf.Deps)
+	}
+	if len(sf.TerraformState) > 0 {
+		out.TerraformState = make([]TerraformStateRef, len(sf.TerraformState))
+		copy(out.TerraformState, sf.TerraformState)
+	}
+	return out
+}
+
 func (idx *Index) GetFile(path string) *StackFile {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-	return idx.files[path]
+	return deepCopyStackFile(idx.files[path])
 }
 
 func (idx *Index) FindComponent(name string) []StackFile {
