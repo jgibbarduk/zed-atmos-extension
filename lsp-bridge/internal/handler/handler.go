@@ -391,6 +391,15 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 				} else {
 					value += "*Unable to resolve path*"
 				}
+				for _, r := range resolved {
+					parent := h.idx.GetFile(r)
+					if parent != nil && len(parent.Vars) > 0 {
+						value += "\n**Vars from this import:**\n"
+						for _, v := range parent.Vars {
+							value += fmt.Sprintf("- `%s`: `%s`\n", v.Key, v.Value)
+						}
+					}
+				}
 				hoverContent = map[string]interface{}{
 					"kind":  "markdown",
 					"value": value,
@@ -413,6 +422,14 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 								}
 								value += fmt.Sprintf("- `%s`\n", rel)
 							}
+						}
+					}
+					// Show accumulated vars for this component
+					vars := collectVars(f, h.idx)
+					if len(vars) > 0 {
+						value += "\n**Accumulated vars:**\n"
+						for k, v := range vars {
+							value += fmt.Sprintf("- `%s`: `%s`\n", k, v)
 						}
 					}
 					hoverContent = map[string]interface{}{
