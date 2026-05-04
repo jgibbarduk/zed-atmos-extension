@@ -108,5 +108,40 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 		}
 	}
 
+	// Check 7: Validate dependencies.components
+	for _, dep := range file.Deps {
+		refs := idx.FindComponent(dep.Component)
+		if len(refs) == 0 {
+			diags = append(diags, Diagnostic{
+				Severity: SeverityError,
+				Message:  fmt.Sprintf("Dependency component '%s' not found", dep.Component),
+				Range:    dep.Range,
+				Source:   "atmos-deps",
+			})
+		}
+	}
+
+	// Check 8: Validate !terraform.state references match declared dependencies
+	for _, ts := range file.TerraformState {
+		if ts.Component == "" {
+			continue
+		}
+		found := false
+		for _, dep := range file.Deps {
+			if dep.Component == ts.Component {
+				found = true
+				break
+			}
+		}
+		if !found {
+			diags = append(diags, Diagnostic{
+				Severity: SeverityWarning,
+				Message:  fmt.Sprintf("!terraform.state references '%s' but it is not declared in dependencies.components", ts.Component),
+				Range:    ts.Range,
+				Source:   "atmos-deps",
+			})
+		}
+	}
+
 	return diags
 }
