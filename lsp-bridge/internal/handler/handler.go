@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/index"
@@ -38,6 +39,7 @@ type LSPHandler struct {
 	initialized         bool
 	diagnosticsDisabled bool
 	projectRoot         string
+	nameTemplate       string
 }
 
 func New(idx *index.Index, downstream DownstreamCaller) *LSPHandler {
@@ -125,6 +127,7 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 
 	if rootPath != "" {
 		h.projectRoot = rootPath
+		h.nameTemplate = parseAtmosNameTemplate(h.projectRoot)
 		if initOpts.InitializationOptions.StacksPath != "" {
 			h.idx.SetBasePath(initOpts.InitializationOptions.StacksPath)
 		} else {
@@ -401,6 +404,16 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 				}
 			}
 		}
+		if hoverContent == nil && h.nameTemplate != "" && len(f.Comps) > 0 {
+			vars := collectVars(f, h.idx)
+			preview := interpolateNameTemplate(h.nameTemplate, vars)
+			if preview != "" {
+				hoverContent = map[string]interface{}{
+					"kind":  "markdown",
+					"value": fmt.Sprintf("**Stack name:** `%s`\n\nComputed from `atmos.yaml` `name_template` with accumulated vars.", preview),
+				}
+			}
+		}
 	}
 
 	if hoverContent == nil {
@@ -507,6 +520,100 @@ func parseAtmosBasePath(atmosYAMLPath string) string {
 		}
 	}
 	return ""
+}
+
+func parseAtmosNameTemplate(rootPath string) string {
+	atmosYAML := filepath.Join(rootPath, "atmos.yaml")
+	content, err := os.ReadFile(atmosYAML)
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(content), "\n")
+	inStacks := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "stacks:") {
+			inStacks = true
+			continue
+		}
+		if inStacks && strings.HasPrefix(trimmed, "name_template:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				val := strings.TrimSpace(parts[1])
+				val = strings.Trim(val, "\"'")
+				return val
+			}
+			return ""
+		}
+		if inStacks && trimmed != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			return ""
+		}
+	}
+	return ""
+}
+
+var (
+	nameTemplateVarsRe = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
+	nameTemplateKeyRe  = regexp.MustCompile(`{{\s*\.([a-zA-Z0-9_]+)\s*}}`)
+	nameTemplateRemRe  = regexp.MustCompile(`{{\s*[^}]*\s*}}`)
+)
+
+func interpolateNameTemplate(tpl string, vars map[string]string) string {
+	result := nameTemplateVarsRe.ReplaceAllStringFunc(tpl, func(m string) string {
+		subs := nameTemplateVarsRe.FindStringSubmatch(m)
+		if len(subs) > 1 {
+			if v, ok := vars[subs[1]]; ok {
+				return v
+			}
+		}
+		return ""
+	})
+
+	result = nameTemplateKeyRe.ReplaceAllStringFunc(result, func(m string) string {
+		subs := nameTemplateKeyRe.FindStringSubmatch(m)
+		if len(subs) > 1 {
+			if v, ok := vars[subs[1]]; ok {
+				return v
+			}
+		}
+		return ""
+	})
+
+	result = nameTemplateRemRe.ReplaceAllString(result, "")
+	return strings.TrimSpace(result)
+}
+
+func collectVars(sf *index.StackFile, idx *index.Index) map[string]string {
+	vars := make(map[string]string)
+	if sf == nil {
+		return vars
+	}
+	visited := make(map[string]bool)
+	collectVarsRecursive(sf, idx, vars, visited)
+	return vars
+}
+
+func collectVarsRecursive(sf *index.StackFile, idx *index.Index, vars map[string]string, visited map[string]bool) {
+	if sf == nil || visited[sf.Path] {
+		return
+	}
+	visited[sf.Path] = true
+
+	fromDir := filepath.Dir(sf.Path)
+	for _, imp := range sf.Imports {
+		resolved := idx.ResolveImport(imp.RawPath, fromDir)
+		for _, r := range resolved {
+			parent := idx.GetFile(r)
+			if parent != nil {
+				collectVarsRecursive(parent, idx, vars, visited)
+			}
+		}
+	}
+
+	for _, v := range sf.Vars {
+		vars[v.Key] = v.Value
+	}
 }
 
 func errorResponse(content []byte, code int, message string) []byte {
