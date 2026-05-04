@@ -275,6 +275,9 @@ func (h *LSPHandler) handleDefinition(content []byte) (bool, []byte, [][]byte, e
 	// Check if cursor is on a !terraform.state tag
 	for _, ts := range f.TerraformState {
 		if ts.Range.StartLine <= req.Params.Position.Line && ts.Range.EndLine >= req.Params.Position.Line {
+			if ts.Component == "" {
+				continue
+			}
 			refs := h.idx.FindComponent(ts.Component)
 			for _, ref := range refs {
 				locations = append(locations, map[string]interface{}{
@@ -469,7 +472,13 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 		if hoverContent == nil {
 			for _, ts := range f.TerraformState {
 				if ts.Range.StartLine <= req.Params.Position.Line && ts.Range.EndLine >= req.Params.Position.Line {
-					value := fmt.Sprintf("**Remote state reference:** `%s`\n\nJQ expression: `%s`\n", ts.Component, ts.JQExpr)
+					if ts.Component == "" {
+						continue
+					}
+					value := fmt.Sprintf("**Remote state reference:** `%s`\n", ts.Component)
+					if ts.JQExpr != "" {
+						value += fmt.Sprintf("\nJQ expression: `%s`\n", ts.JQExpr)
+					}
 					refs := h.idx.FindComponent(ts.Component)
 					if len(refs) > 0 {
 						value += "\n**Component defined in:**\n"
