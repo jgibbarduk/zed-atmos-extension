@@ -717,7 +717,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			for _, v := range f.Vars {
 				if v.Range.StartLine <= req.Params.Position.Line && v.Range.EndLine >= req.Params.Position.Line {
 					if strings.Contains(v.Value, "{{") && strings.Contains(v.Value, "}}") {
-						_, resolved := findTemplateExpressionAtPosition(f, req.Params.Position.Line, req.Params.Position.Character)
+						_, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character)
 						if resolved != "" && resolved != v.Value {
 							value := fmt.Sprintf("**Template:** `%s`\n\n**Resolved:** `%s`", v.Value, resolved)
 							hoverContent = map[string]interface{}{
@@ -927,7 +927,7 @@ func interpolateNameTemplate(tpl string, vars map[string]string) string {
 
 var templateVarExprRe = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
 
-func findTemplateExpressionAtPosition(sf *index.StackFile, line uint32, char uint32) (expr string, resolved string) {
+func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, line uint32, char uint32) (expr string, resolved string) {
 	for _, v := range sf.Vars {
 		if v.Range.StartLine == line && v.Range.StartChar <= char && v.Range.EndChar >= char {
 			expr = v.Value
@@ -941,7 +941,7 @@ func findTemplateExpressionAtPosition(sf *index.StackFile, line uint32, char uin
 	resolved = templateVarExprRe.ReplaceAllStringFunc(resolved, func(m string) string {
 		subs := templateVarExprRe.FindStringSubmatch(m)
 		if len(subs) > 1 {
-			vars := collectVars(sf, nil)
+			vars := collectVars(sf, idx)
 			if v, ok := vars[subs[1]]; ok {
 				return v
 			}
@@ -979,13 +979,15 @@ func collectVarsRecursive(sf *index.StackFile, idx *index.Index, vars map[string
 	}
 	visited[sf.Path] = true
 
-	fromDir := filepath.Dir(sf.Path)
-	for _, imp := range sf.Imports {
-		resolved := idx.ResolveImport(imp.RawPath, fromDir)
-		for _, r := range resolved {
-			parent := idx.GetFile(r)
-			if parent != nil {
-				collectVarsRecursive(parent, idx, vars, visited)
+	if idx != nil {
+		fromDir := filepath.Dir(sf.Path)
+		for _, imp := range sf.Imports {
+			resolved := idx.ResolveImport(imp.RawPath, fromDir)
+			for _, r := range resolved {
+				parent := idx.GetFile(r)
+				if parent != nil {
+					collectVarsRecursive(parent, idx, vars, visited)
+				}
 			}
 		}
 	}
