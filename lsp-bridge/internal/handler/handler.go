@@ -255,6 +255,22 @@ func (h *LSPHandler) handleDefinition(content []byte) (bool, []byte, [][]byte, e
 		}
 	}
 
+	// Check if cursor is on a metadata.inherits value
+	for _, meta := range f.Metadata {
+		if meta.Inherits != "" && meta.InheritsRange.StartLine <= req.Params.Position.Line && meta.InheritsRange.EndLine >= req.Params.Position.Line {
+			refs := h.idx.FindComponent(meta.Inherits)
+			for _, ref := range refs {
+				locations = append(locations, map[string]interface{}{
+					"uri": "file://" + ref.Path,
+					"range": map[string]interface{}{
+						"start": map[string]uint32{"line": 0, "character": 0},
+						"end":   map[string]uint32{"line": 0, "character": 0},
+					},
+				})
+			}
+		}
+	}
+
 	if locations == nil {
 		locations = []map[string]interface{}{}
 	}
