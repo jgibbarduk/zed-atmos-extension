@@ -60,7 +60,10 @@ func TestHandleDefinition_Import(t *testing.T) {
 	os.MkdirAll(filepath.Join(dir, "stacks/dev"), 0755)
 	os.WriteFile(filepath.Join(dir, "stacks/dev/defaults.yaml"), []byte("vars:\n  namespace: dev\n"), 0644)
 	os.WriteFile(filepath.Join(dir, "stacks/dev/stack.yaml"), []byte("import:\n  - defaults\n"), 0644)
-	idx2, _ := index.New(dir)
+	idx2, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	idx2.SetBasePath(dir)
 	idx2.Reindex()
 	h2 := New(idx2, &mockDownstream{})
