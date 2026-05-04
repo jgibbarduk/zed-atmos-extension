@@ -520,10 +520,10 @@ func parseAtmosConfig(rootPath string) (basePath, nameTemplate string) {
 				subKey := val.Content[j].Value
 				subVal := val.Content[j+1]
 				if subKey == "base_path" && subVal != nil {
-					basePath = strings.Trim(subVal.Value, "\"'")
+					basePath = subVal.Value
 				}
 				if subKey == "name_template" && subVal != nil {
-					nameTemplate = strings.Trim(subVal.Value, "\"'")
+					nameTemplate = subVal.Value
 				}
 			}
 		}
