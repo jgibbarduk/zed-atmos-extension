@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jamesgibbard/zed-atmos-language/lsp-bridge/internal/index"
+	"gopkg.in/yaml.v3"
 )
 
 type DownstreamCaller interface {
@@ -127,13 +128,15 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 
 	if rootPath != "" {
 		h.projectRoot = rootPath
-		h.nameTemplate = parseAtmosNameTemplate(h.projectRoot)
+		basePath, nameTemplate := parseAtmosConfig(rootPath)
 		if initOpts.InitializationOptions.StacksPath != "" {
 			h.idx.SetBasePath(initOpts.InitializationOptions.StacksPath)
+		} else if basePath != "" {
+			h.idx.SetBasePath(filepath.Join(rootPath, basePath))
 		} else {
-			stacksPath := resolveStacksPath(rootPath)
-			h.idx.SetBasePath(stacksPath)
+			h.idx.SetBasePath(resolveStacksPath(rootPath))
 		}
+		h.nameTemplate = nameTemplate
 	}
 
 	if initOpts.InitializationOptions.DiagnosticsEnabled != nil && !*initOpts.InitializationOptions.DiagnosticsEnabled {
@@ -483,8 +486,7 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 }
 
 func resolveStacksPath(rootPath string) string {
-	atmosYAML := filepath.Join(rootPath, "atmos.yaml")
-	basePath := parseAtmosBasePath(atmosYAML)
+	basePath, _ := parseAtmosConfig(rootPath)
 	if basePath == "" {
 		log.Printf("no atmos.yaml at %s or no stacks.base_path, defaulting to stacks/", rootPath)
 		return filepath.Join(rootPath, "stacks")
@@ -492,65 +494,41 @@ func resolveStacksPath(rootPath string) string {
 	return filepath.Join(rootPath, basePath)
 }
 
-func parseAtmosBasePath(atmosYAMLPath string) string {
-	content, err := os.ReadFile(atmosYAMLPath)
+func parseAtmosConfig(rootPath string) (basePath, nameTemplate string) {
+	content, err := os.ReadFile(filepath.Join(rootPath, "atmos.yaml"))
 	if err != nil {
-		return ""
+		return "", ""
 	}
 
-	lines := strings.Split(string(content), "\n")
-	inStacks := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "stacks:") {
-			inStacks = true
-			continue
-		}
-		if inStacks && strings.HasPrefix(trimmed, "base_path:") {
-			parts := strings.SplitN(trimmed, ":", 2)
-			if len(parts) == 2 {
-				val := strings.TrimSpace(parts[1])
-				val = strings.Trim(val, "\"'")
-				return val
+	var doc yaml.Node
+	if err := yaml.Unmarshal(content, &doc); err != nil {
+		return "", ""
+	}
+	if len(doc.Content) == 0 {
+		return "", ""
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return "", ""
+	}
+
+	for i := 0; i < len(root.Content)-1; i += 2 {
+		key := root.Content[i].Value
+		val := root.Content[i+1]
+		if key == "stacks" && val != nil && val.Kind == yaml.MappingNode {
+			for j := 0; j < len(val.Content)-1; j += 2 {
+				subKey := val.Content[j].Value
+				subVal := val.Content[j+1]
+				if subKey == "base_path" && subVal != nil {
+					basePath = strings.Trim(subVal.Value, "\"'")
+				}
+				if subKey == "name_template" && subVal != nil {
+					nameTemplate = strings.Trim(subVal.Value, "\"'")
+				}
 			}
-			return ""
-		}
-		if inStacks && trimmed != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
-			return ""
 		}
 	}
-	return ""
-}
-
-func parseAtmosNameTemplate(rootPath string) string {
-	atmosYAML := filepath.Join(rootPath, "atmos.yaml")
-	content, err := os.ReadFile(atmosYAML)
-	if err != nil {
-		return ""
-	}
-
-	lines := strings.Split(string(content), "\n")
-	inStacks := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "stacks:") {
-			inStacks = true
-			continue
-		}
-		if inStacks && strings.HasPrefix(trimmed, "name_template:") {
-			parts := strings.SplitN(trimmed, ":", 2)
-			if len(parts) == 2 {
-				val := strings.TrimSpace(parts[1])
-				val = strings.Trim(val, "\"'")
-				return val
-			}
-			return ""
-		}
-		if inStacks && trimmed != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
-			return ""
-		}
-	}
-	return ""
+	return basePath, nameTemplate
 }
 
 var (
