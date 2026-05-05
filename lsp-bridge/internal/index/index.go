@@ -57,14 +57,29 @@ type TerraformStateRef struct {
 	Range     Range  `json:"range"`
 }
 
+type BackendTypeNode struct {
+	Component string `json:"component"`
+	Type      string `json:"type"`
+	Kind      string `json:"kind"`
+	Range     Range  `json:"range"`
+}
+
+type SettingsDependsOnNode struct {
+	Key       string `json:"key"`
+	Component string `json:"component"`
+	Range     Range  `json:"range"`
+}
+
 type StackFile struct {
-	Path           string              `json:"path"`
-	Imports        []ImportNode        `json:"imports"`
-	Comps          []CompNode          `json:"comps"`
-	Metadata       []MetadataNode      `json:"metadata"`
-	Vars           []VarNode           `json:"vars"`
-	Deps           []DepNode           `json:"deps"`
-	TerraformState []TerraformStateRef `json:"terraform_state"`
+	Path           string                  `json:"path"`
+	Imports        []ImportNode            `json:"imports"`
+	Comps          []CompNode              `json:"comps"`
+	Metadata       []MetadataNode          `json:"metadata"`
+	Vars           []VarNode               `json:"vars"`
+	Deps           []DepNode               `json:"deps"`
+	TerraformState []TerraformStateRef     `json:"terraform_state"`
+	BackendTypes   []BackendTypeNode       `json:"backend_types"`
+	SettingsDeps   []SettingsDependsOnNode `json:"settings_deps"`
 }
 
 type Index struct {
@@ -223,6 +238,14 @@ func deepCopyStackFile(sf *StackFile) *StackFile {
 		out.TerraformState = make([]TerraformStateRef, len(sf.TerraformState))
 		copy(out.TerraformState, sf.TerraformState)
 	}
+	if len(sf.BackendTypes) > 0 {
+		out.BackendTypes = make([]BackendTypeNode, len(sf.BackendTypes))
+		copy(out.BackendTypes, sf.BackendTypes)
+	}
+	if len(sf.SettingsDeps) > 0 {
+		out.SettingsDeps = make([]SettingsDependsOnNode, len(sf.SettingsDeps))
+		copy(out.SettingsDeps, sf.SettingsDeps)
+	}
 	return out
 }
 
@@ -312,6 +335,74 @@ func (idx *Index) ReindexFile(path string) {
 	if sf == nil {
 		sf = &StackFile{Path: path}
 	}
+
+	if existed && oldFile != nil {
+		for _, old := range oldFile.Imports {
+			if updated, ok := removePath(idx.byImport[old.RawPath], path); ok {
+				if len(updated) == 0 {
+					delete(idx.byImport, old.RawPath)
+				} else {
+					idx.byImport[old.RawPath] = updated
+				}
+			}
+		}
+		for _, old := range oldFile.Comps {
+			if updated, ok := removePath(idx.byComponent[old.Name], path); ok {
+				if len(updated) == 0 {
+					delete(idx.byComponent, old.Name)
+				} else {
+					idx.byComponent[old.Name] = updated
+				}
+			}
+		}
+		for _, old := range oldFile.Metadata {
+			if old.Component != "" {
+				if updated, ok := removePath(idx.byComponent[old.Component], path); ok {
+					if len(updated) == 0 {
+						delete(idx.byComponent, old.Component)
+					} else {
+						idx.byComponent[old.Component] = updated
+					}
+				}
+			}
+			if old.Inherits != "" {
+				if updated, ok := removePath(idx.byInherit[old.Inherits], path); ok {
+					if len(updated) == 0 {
+						delete(idx.byInherit, old.Inherits)
+					} else {
+						idx.byInherit[old.Inherits] = updated
+					}
+				}
+			}
+		}
+	}
+
+	idx.files[path] = sf
+	for _, imp := range sf.Imports {
+		idx.byImport[imp.RawPath] = append(idx.byImport[imp.RawPath], path)
+	}
+	for _, comp := range sf.Comps {
+		idx.byComponent[comp.Name] = append(idx.byComponent[comp.Name], path)
+	}
+	for _, meta := range sf.Metadata {
+		if meta.Component != "" {
+			idx.byComponent[meta.Component] = append(idx.byComponent[meta.Component], path)
+		}
+		if meta.Inherits != "" {
+			idx.byInherit[meta.Inherits] = append(idx.byInherit[meta.Inherits], path)
+		}
+	}
+}
+
+func (idx *Index) UpsertFile(path string, sf *StackFile) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	if sf == nil {
+		sf = &StackFile{Path: path}
+	}
+
+	oldFile, existed := idx.files[path]
 
 	if existed && oldFile != nil {
 		for _, old := range oldFile.Imports {

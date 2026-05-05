@@ -9,7 +9,7 @@ repository = "https://github.com/jgibbarduk/zed-atmos-extension"
 languages = ["languages/atmos"]
 
 capabilities = [
-  { kind = "process:exec", command = "atmos-lsp-bridge", args = ["**"] },
+  { kind = "process:exec", command = "atmos-lsp-bridge", args = [] },
 ]
 
 [grammars.yaml]

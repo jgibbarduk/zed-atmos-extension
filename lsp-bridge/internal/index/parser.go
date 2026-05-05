@@ -12,21 +12,24 @@ func parseYAMLFile(path string) (*StackFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseYAMLContent(path, content), nil
+}
 
+func ParseYAMLContent(path string, content []byte) *StackFile {
 	sf := &StackFile{Path: path}
 
 	var doc yaml.Node
 	if err := yaml.Unmarshal(content, &doc); err != nil {
-		return sf, nil
+		return sf
 	}
 
 	if len(doc.Content) == 0 {
-		return sf, nil
+		return sf
 	}
 
 	root := doc.Content[0]
 	if root.Kind != yaml.MappingNode {
-		return sf, nil
+		return sf
 	}
 
 	for i := 0; i < len(root.Content)-1; i += 2 {
@@ -46,11 +49,15 @@ func parseYAMLFile(path string) (*StackFile, error) {
 		if keyStr == "components" && val != nil && val.Kind == yaml.MappingNode {
 			extractComponents(val, sf)
 		}
+
+		if keyStr == "terraform" && val != nil && val.Kind == yaml.MappingNode {
+			extractBackendTypes(val, sf, "")
+		}
 	}
 
 	extractTerraformStateTags(root, sf)
 
-	return sf, nil
+	return sf
 }
 
 func nodeRange(n *yaml.Node) Range {
@@ -122,6 +129,8 @@ func extractComponents(node *yaml.Node, sf *StackFile) {
 				if compVal != nil && compVal.Kind == yaml.MappingNode {
 					extractMetadata(compVal, sf)
 					extractDependencies(compVal, sf)
+					extractBackendTypes(compVal, sf, compName)
+					extractSettingsDependsOn(compVal, sf, compName)
 					for k := 0; k < len(compVal.Content)-1; k += 2 {
 						cvKey := compVal.Content[k]
 						cvVal := compVal.Content[k+1]
@@ -223,6 +232,79 @@ func extractTerraformStateTags(node *yaml.Node, sf *StackFile) {
 	}
 	for _, child := range node.Content {
 		extractTerraformStateTags(child, sf)
+	}
+}
+
+func extractBackendTypes(node *yaml.Node, sf *StackFile, componentName string) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		key := node.Content[i]
+		val := node.Content[i+1]
+		if val == nil || val.Kind != yaml.ScalarNode {
+			continue
+		}
+		switch key.Value {
+		case "backend_type":
+			sf.BackendTypes = append(sf.BackendTypes, BackendTypeNode{
+				Component: componentName,
+				Type:      val.Value,
+				Kind:      "backend_type",
+				Range:     nodeRange(val),
+			})
+		case "remote_state_backend_type":
+			sf.BackendTypes = append(sf.BackendTypes, BackendTypeNode{
+				Component: componentName,
+				Type:      val.Value,
+				Kind:      "remote_state_backend_type",
+				Range:     nodeRange(val),
+			})
+		}
+	}
+}
+
+func extractSettingsDependsOn(node *yaml.Node, sf *StackFile, componentName string) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		key := node.Content[i]
+		val := node.Content[i+1]
+		if key.Value != "settings" || val == nil || val.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j < len(val.Content)-1; j += 2 {
+			subKey := val.Content[j]
+			subVal := val.Content[j+1]
+			if subKey.Value != "depends_on" || subVal == nil || subVal.Kind != yaml.MappingNode {
+				continue
+			}
+			for k := 0; k < len(subVal.Content)-1; k += 2 {
+				depKey := subVal.Content[k]
+				depVal := subVal.Content[k+1]
+				if depVal == nil || depVal.Kind != yaml.MappingNode {
+					continue
+				}
+				depName := depKey.Value
+				var depComponent string
+				for m := 0; m < len(depVal.Content)-1; m += 2 {
+					dk := depVal.Content[m]
+					dv := depVal.Content[m+1]
+					if dk.Value == "component" && dv != nil && dv.Kind == yaml.ScalarNode {
+						depComponent = dv.Value
+						break
+					}
+				}
+				if depComponent != "" {
+					sf.SettingsDeps = append(sf.SettingsDeps, SettingsDependsOnNode{
+						Key:       depName,
+						Component: depComponent,
+						Range:     nodeRange(depKey),
+					})
+				}
+			}
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -11,11 +12,22 @@ import (
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/proxy"
 )
 
+type nopDownstream struct{}
+
+func (n *nopDownstream) CallDownstream(content []byte) ([]byte, error) {
+	return nil, fmt.Errorf("downstream atmos LSP not available")
+}
+
+func (n *nopDownstream) SendNotification(content []byte) error {
+	return nil
+}
+
 func main() {
 	debug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
 
-	if *debug {
+	envDebug := os.Getenv("ATMOS_LSP_BRIDGE_DEBUG") != ""
+	if *debug || envDebug {
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	} else {
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -31,7 +43,8 @@ func main() {
 
 	p, err := proxy.New("atmos")
 	if err != nil {
-		log.Fatalf("create proxy: %v", err)
+		slog.Warn("atmos lsp not found, running in bridge-only mode", "error", err)
+		p = proxy.NewNop()
 	}
 	defer p.Close()
 

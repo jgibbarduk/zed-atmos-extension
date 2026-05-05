@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
@@ -53,15 +55,18 @@ func New(idx *index.Index, downstream DownstreamCaller) *LSPHandler {
 }
 
 func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, [][]byte, error) {
-	if method == "initialize" {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in HandleMethod(%s): %v", method, r)
+		}
+	}()
+
+	switch method {
+	case "initialize":
 		return h.handleInitialize(content)
-	}
-
-	if method == "initialized" {
+	case "initialized":
 		return h.handleInitialized(content)
-	}
-
-	if method == "shutdown" {
+	case "shutdown":
 		h.initialized = false
 		downstreamResp, err := h.downstream.CallDownstream(content)
 		if err != nil {
@@ -70,38 +75,29 @@ func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, 
 		if downstreamResp != nil {
 			return true, downstreamResp, nil, nil
 		}
-		return true, nil, nil, nil
-	}
-
-	if method == "exit" {
+		// Always return a response so Zed doesn't hang waiting.
+		return true, nullResult(content), nil, nil
+	case "exit":
 		h.downstream.SendNotification(content)
 		return true, nil, nil, nil
-	}
-
-	if method == "textDocument/definition" {
+	case "textDocument/definition":
 		return h.handleDefinition(content)
-	}
-
-	if method == "textDocument/references" {
+	case "textDocument/references":
 		return h.handleReferences(content)
-	}
-
-	if method == "textDocument/hover" {
-		return h.handleHover(content)
-	}
-
-	if method == "textDocument/rename" {
+	case "textDocument/hover":
+		start := time.Now()
+		handled, resp, notifs, err := h.handleHover(content)
+		if dur := time.Since(start); dur > 100*time.Millisecond {
+			log.Printf("SLOW hover: %v", dur)
+		}
+		return handled, resp, notifs, err
+	case "textDocument/rename":
 		return h.handleRename(content)
-	}
-
-	if method == "textDocument/codeAction" {
+	case "textDocument/codeAction":
 		return h.handleCodeAction(content)
-	}
-
-	if method == "textDocument/didOpen" || method == "textDocument/didChange" || method == "textDocument/didSave" {
+	case "textDocument/didOpen", "textDocument/didChange", "textDocument/didSave":
 		return h.handleDiagnostics(content)
 	}
-
 	return false, nil, nil, nil
 }
 
@@ -171,6 +167,7 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 		"textDocumentSync": map[string]interface{}{
 			"openClose": true,
 			"change":    1,
+			"save":      true,
 		},
 	}
 
@@ -723,7 +720,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			for _, v := range f.Vars {
 				if v.Range.StartLine <= req.Params.Position.Line && v.Range.EndLine >= req.Params.Position.Line {
 					if strings.Contains(v.Value, "{{") && strings.Contains(v.Value, "}}") {
-						expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character)
+						expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character, h.nameTemplate)
 						if expr != "" {
 							value := fmt.Sprintf("**Template:** `%s`", expr)
 							if resolved != "" && resolved != expr {
@@ -740,7 +737,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			}
 			// Fallback: template expressions outside of vars: blocks
 			if hoverContent == nil {
-				expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character)
+				expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character, h.nameTemplate)
 				if expr != "" {
 					value := fmt.Sprintf("**Template:** `%s`", expr)
 					if resolved != "" && resolved != expr {
@@ -825,6 +822,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 
 func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, error) {
 	if h.diagnosticsDisabled {
+		log.Printf("diagnostics: disabled, skipping")
 		return false, nil, nil, nil
 	}
 
@@ -834,16 +832,51 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 		Params  textDocumentParams `json:"params"`
 	}
 	if err := json.Unmarshal(content, &req); err != nil {
+		log.Printf("diagnostics: unmarshal error: %v", err)
 		return true, nil, nil, nil
 	}
 
 	path := strings.TrimPrefix(req.Params.TextDocument.URI, "file://")
-	f := h.idx.GetFile(path)
-	if f == nil {
-		return false, nil, nil, nil
-	}
+	log.Printf("diagnostics: %s for %s", req.Method, path)
 
-	if req.Method == "textDocument/didSave" {
+	// Parse live document content for didOpen / didChange so diagnostics
+	// are accurate even before the file is saved to disk.
+	if req.Method == "textDocument/didOpen" {
+		var openReq struct {
+			Params struct {
+				TextDocument struct {
+					Text string `json:"text"`
+				} `json:"textDocument"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(content, &openReq); err == nil && openReq.Params.TextDocument.Text != "" {
+			text := openReq.Params.TextDocument.Text
+			documentContentMu.Lock()
+			documentContent[path] = []byte(text)
+			documentContentMu.Unlock()
+			sf := index.ParseYAMLContent(path, []byte(text))
+			h.idx.UpsertFile(path, sf)
+		}
+	} else if req.Method == "textDocument/didChange" {
+		var changeReq struct {
+			Params struct {
+				ContentChanges []struct {
+					Text string `json:"text"`
+				} `json:"contentChanges"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(content, &changeReq); err == nil && len(changeReq.Params.ContentChanges) > 0 {
+			text := changeReq.Params.ContentChanges[0].Text
+			documentContentMu.Lock()
+			documentContent[path] = []byte(text)
+			documentContentMu.Unlock()
+			sf := index.ParseYAMLContent(path, []byte(text))
+			h.idx.UpsertFile(path, sf)
+		}
+	} else if req.Method == "textDocument/didSave" {
+		documentContentMu.Lock()
+		delete(documentContent, path)
+		documentContentMu.Unlock()
 		h.idx.ReindexFile(path)
 	}
 
@@ -852,23 +885,40 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 		log.Printf("diagnostics: forward to atmos failed: %v", err)
 	}
 
-	diags := runBestPracticeChecks(f, filepath.Dir(path), h.idx)
-
-	notifications := [][]byte{}
-	if len(diags) > 0 {
+	f := h.idx.GetFile(path)
+	if f == nil {
+		log.Printf("diagnostics: no parsed file for %s, publishing empty set", path)
+		// Nothing we can validate yet, but we must still clear any stale
+		// diagnostics by publishing an empty set.
 		notification := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"method":  "textDocument/publishDiagnostics",
 			"params": map[string]interface{}{
 				"uri":         req.Params.TextDocument.URI,
-				"diagnostics": diags,
+				"diagnostics": []Diagnostic{},
 			},
 		}
 		notifBytes, _ := json.Marshal(notification)
-		notifications = append(notifications, notifBytes)
+		return true, nil, [][]byte{notifBytes}, nil
 	}
 
-	return true, nil, notifications, nil
+	diags := runBestPracticeChecks(f, filepath.Dir(path), h.idx)
+	log.Printf("diagnostics: found %d issues for %s", len(diags), path)
+	for i, d := range diags {
+		log.Printf("diagnostics: [%d] %s (line %d)", i, d.Message, d.Range.StartLine)
+	}
+
+	notification := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/publishDiagnostics",
+		"params": map[string]interface{}{
+			"uri":         req.Params.TextDocument.URI,
+			"diagnostics": diags,
+		},
+	}
+	notifBytes, _ := json.Marshal(notification)
+	log.Printf("diagnostics: publishing %d bytes", len(notifBytes))
+	return true, nil, [][]byte{notifBytes}, nil
 }
 
 func resolveStacksPath(rootPath string) string {
@@ -921,6 +971,9 @@ var (
 	nameTemplateVarsRe = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
 	nameTemplateKeyRe  = regexp.MustCompile(`{{\s*\.([a-zA-Z0-9_]+)\s*}}`)
 	nameTemplateRemRe  = regexp.MustCompile(`{{\s*[^}]*\s*}}`)
+
+	documentContent   = make(map[string][]byte)
+	documentContentMu sync.RWMutex
 )
 
 func interpolateNameTemplate(tpl string, vars map[string]string, componentName string) string {
@@ -951,10 +1004,14 @@ func interpolateNameTemplate(tpl string, vars map[string]string, componentName s
 	return strings.TrimSpace(result)
 }
 
-var templateVarExprRe = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
-var templateExprRe = regexp.MustCompile(`{{\s*[^}]+\s*}}`)
+var (
+	templateVarExprRe   = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
+	templateExprRe      = regexp.MustCompile(`{{\s*[^}]+\s*}}`)
+	atmosComponentRe    = regexp.MustCompile(`{{\s*\.atmos_component\s*}}`)
+	atmosStackRe        = regexp.MustCompile(`{{\s*\.atmos_stack\s*}}`)
+)
 
-func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, line uint32, char uint32) (expr string, resolved string) {
+func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, line uint32, char uint32, nameTemplate string) (expr string, resolved string) {
 	// 1. Try matching a VarNode (vars: block)
 	for _, v := range sf.Vars {
 		if v.Range.StartLine == line && v.Range.StartChar <= char && v.Range.EndChar >= char {
@@ -963,26 +1020,56 @@ func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, lin
 		}
 	}
 
-	// 2. Fallback: read the raw file and extract template expressions from the line
+	// 2. Fallback: use live document content (from didOpen/didChange) to extract
+	// template expressions from the line. If no live content is available, fall
+	// back to reading from disk.
 	if expr == "" {
-		content, err := os.ReadFile(sf.Path)
-		if err != nil {
-			return "", ""
+		documentContentMu.RLock()
+		content, ok := documentContent[sf.Path]
+		documentContentMu.RUnlock()
+		if !ok {
+			var err error
+			content, err = os.ReadFile(sf.Path)
+			if err != nil {
+				return "", ""
+			}
 		}
 		lines := strings.Split(string(content), "\n")
 		if int(line) >= len(lines) {
 			return "", ""
 		}
 		lineText := lines[line]
-		matches := templateExprRe.FindAllString(lineText, -1)
-		if len(matches) == 0 {
+		matchIdxs := templateExprRe.FindAllStringIndex(lineText, -1)
+		if len(matchIdxs) == 0 {
 			return "", ""
 		}
-		expr = strings.Join(matches, "")
+		// Find the match that contains char. If none match, check if char is within
+		// the span of all matches (between first start and last end).
+		firstMatch := 0
+		lastMatch := len(matchIdxs) - 1
+		found := false
+		for i, m := range matchIdxs {
+			if m[0] <= int(char) && m[1] > int(char) {
+				firstMatch = i
+				lastMatch = i
+				found = true
+				break
+			}
+		}
+		if !found {
+			if int(char) >= matchIdxs[0][0] && int(char) <= matchIdxs[lastMatch][1] {
+				// char is in the literal text between matches — show the whole span
+			} else {
+				return "", ""
+			}
+		}
+		expr = lineText[matchIdxs[firstMatch][0]:matchIdxs[lastMatch][1]]
 	}
 
 	resolved = expr
 	vars := collectVars(sf, idx)
+
+	// Resolve {{ .vars.X }} → vars[X]
 	resolved = templateVarExprRe.ReplaceAllStringFunc(resolved, func(m string) string {
 		subs := templateVarExprRe.FindStringSubmatch(m)
 		if len(subs) > 1 {
@@ -993,7 +1080,23 @@ func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, lin
 		return m
 	})
 
-	if strings.Contains(expr, "{{ .atmos_component }}") {
+	// Resolve {{ .X }} → vars[X] for direct key references
+	// (excluding .atmos_component and .atmos_stack which have special handling)
+	resolved = nameTemplateKeyRe.ReplaceAllStringFunc(resolved, func(m string) string {
+		subs := nameTemplateKeyRe.FindStringSubmatch(m)
+		if len(subs) > 1 {
+			key := subs[1]
+			if key == "atmos_component" || key == "atmos_stack" {
+				return m
+			}
+			if v, ok := vars[key]; ok {
+				return v
+			}
+		}
+		return m
+	})
+
+	if atmosComponentRe.MatchString(expr) {
 		compName := ""
 		// First try: was this a VarNode inside a component?
 		for _, v := range sf.Vars {
@@ -1007,11 +1110,35 @@ func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, lin
 			compName = findComponentForLine(sf, line)
 		}
 		if compName != "" {
-			resolved = strings.ReplaceAll(resolved, "{{ .atmos_component }}", compName)
+			resolved = atmosComponentRe.ReplaceAllString(resolved, compName)
+		}
+	}
+
+	if atmosStackRe.MatchString(expr) {
+		stackName := computeStackName(sf, idx, nameTemplate)
+		if stackName != "" {
+			resolved = atmosStackRe.ReplaceAllString(resolved, stackName)
 		}
 	}
 
 	return expr, resolved
+}
+
+func computeStackName(sf *index.StackFile, idx *index.Index, nameTemplate string) string {
+	if sf == nil || idx == nil {
+		return ""
+	}
+	rawStackName := ""
+	if rel, err := filepath.Rel(idx.BasePath(), sf.Path); err == nil {
+		rawStackName = strings.TrimSuffix(rel, filepath.Ext(rel))
+	}
+	if nameTemplate != "" {
+		vars := collectVars(sf, idx)
+		// Inject atmos_stack so interpolateNameTemplate can resolve it.
+		vars["atmos_stack"] = rawStackName
+		return interpolateNameTemplate(nameTemplate, vars, "")
+	}
+	return rawStackName
 }
 
 func findComponentForLine(sf *index.StackFile, line uint32) string {
@@ -1073,6 +1200,20 @@ func emptyResult(content []byte, id json.RawMessage) []byte {
 		"jsonrpc": "2.0",
 		"id":      id,
 		"result":  []interface{}{},
+	}
+	b, _ := json.Marshal(resp)
+	return b
+}
+
+func nullResult(content []byte) []byte {
+	var req struct {
+		ID json.RawMessage `json:"id"`
+	}
+	json.Unmarshal(content, &req)
+	resp := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"result":  nil,
 	}
 	b, _ := json.Marshal(resp)
 	return b

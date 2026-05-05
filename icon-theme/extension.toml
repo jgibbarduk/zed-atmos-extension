@@ -2,7 +2,7 @@ id = "atmos-icon-theme"
 name = "Atmos Icon Theme"
 version = "0.1.0"
 schema_version = 1
-authors = ["James Gibbard <james@example.com>"]
+authors = ["James Gibbard <jgibbard@gmail.com>"]
 description = "File icons for Atmos projects — replaces the YAML file icon with the Atmos logo"
 repository = "https://github.com/jgibbarduk/zed-atmos-extension"
 

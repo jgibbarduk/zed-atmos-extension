@@ -7,28 +7,40 @@ tasks:
     cmds:
       - go build -o atmos-lsp-bridge .
 
+  build:bridge:debug:
+    desc: Build the Go LSP bridge binary with debug symbols (for use with --debug flag)
+    dir: lsp-bridge
+    cmds:
+      - go build -gcflags="all=-N -l" -o atmos-lsp-bridge .
+
   install:bridge:
     desc: Build and install the LSP bridge to /usr/local/bin
     deps: [build:bridge]
     cmds:
       - cp -f lsp-bridge/atmos-lsp-bridge /usr/local/bin/
 
+  install:bridge:debug:
+    desc: Build debug binary and install to /usr/local/bin
+    deps: [build:bridge:debug]
+    cmds:
+      - cp -f lsp-bridge/atmos-lsp-bridge /usr/local/bin/
+
   build:wasm:
     desc: Build the Rust WASM extension
     cmds:
-      - cargo build --target wasm32-wasip1
+      - cargo build --target wasm32-wasip2
 
   install:ext:
     desc: Build WASM and copy to extension.wasm
     deps: [build:wasm]
     cmds:
-      - cp -f target/wasm32-wasip1/debug/zed_atmos_language.wasm extension.wasm
+      - cp -f target/wasm32-wasip2/debug/zed_atmos_language.wasm extension.wasm
 
   check:
     desc: Run all checks (format, lint, vet, test)
     cmds:
       - cargo fmt --check
-      - cargo clippy --target wasm32-wasip1 -- -D warnings
+      - cargo clippy --target wasm32-wasip2 -- -D warnings
       - cd lsp-bridge && go vet ./...
       - cd lsp-bridge && go test ./...
 

@@ -69,3 +69,17 @@ func ParseMethod(content []byte) string {
 	}
 	return msg.Method
 }
+
+// IsRequest returns true if the message is a request from server to client.
+// Requests have both an "id" and a "method" field. Notifications have "method"
+// but no "id". Responses have "id" but no "method".
+func IsRequest(content []byte) bool {
+	var msg struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+	}
+	if err := json.Unmarshal(content, &msg); err != nil {
+		return false
+	}
+	return msg.ID != nil && msg.Method != ""
+}

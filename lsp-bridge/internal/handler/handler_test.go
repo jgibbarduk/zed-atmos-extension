@@ -313,6 +313,52 @@ func TestHandleHover_ComponentWithAtmosComponentStackName(t *testing.T) {
 	}
 }
 
+func TestHandleHover_TemplateExpression_DirectKey(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\ncomponents:\n  terraform:\n    database:\n      vars:\n        env: '{{ .namespace }}'\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	// Hover over the env value line (line 6 in 0-indexed)
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 6, "character": 14},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/hover", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	contents := result["contents"].(map[string]interface{})
+	value := contents["value"].(string)
+	if !strings.Contains(value, "Template:") {
+		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "Resolved:") {
+		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "dev") {
+		t.Fatalf("expected resolved value 'dev' in hover, got: %s", value)
+	}
+}
+
 func TestHandleHover_TemplateExpression_NonVarsBlock(t *testing.T) {
 	dir := t.TempDir()
 	stackPath := filepath.Join(dir, "stacks/mixins/atmos-pro/default.yaml")
@@ -353,6 +399,106 @@ func TestHandleHover_TemplateExpression_NonVarsBlock(t *testing.T) {
 	}
 	if !strings.Contains(value, "{{ .atmos_component }}") {
 		t.Fatalf("expected template expression in hover, got: %s", value)
+	}
+}
+
+func TestHandleHover_TemplateExpression_MultiExpressionLine(t *testing.T) {
+	// Place the expression outside vars: so the fallback path is exercised.
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  tenant: plat\n  stage: dev\nsettings:\n  env:\n    name: \"{{ .vars.tenant }}-{{ .vars.stage }}\"\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	// Hover over the dash between template expressions on line 5 (0-indexed)
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 5, "character": 29},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/hover", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	contents := result["contents"].(map[string]interface{})
+	value := contents["value"].(string)
+	if !strings.Contains(value, "Template:") {
+		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "Resolved:") {
+		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "plat-dev") {
+		t.Fatalf("expected resolved value 'plat-dev' (with dash preserved), got: %s", value)
+	}
+	// Ensure we didn't lose the dash by concatenating matches
+	if strings.Contains(value, "platdev") {
+		t.Fatalf("resolved value incorrectly dropped dash, got: %s", value)
+	}
+}
+
+func TestHandleHover_TemplateExpression_AtmosStack(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/orgs/ex1/plat/dev/us-east-2.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: ex1\ncomponents:\n  terraform:\n    database:\n      vars:\n        stack_ref: '{{ .atmos_stack }}'\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// BasePath should be the stacks directory, matching real Atmos projects.
+	idx.SetBasePath(filepath.Join(dir, "stacks"))
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+	h.nameTemplate = "{{ .namespace }}-{{ .atmos_stack }}"
+
+	// Hover over the stack_ref value line (line 6 in 0-indexed)
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 6, "character": 20},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/hover", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	contents := result["contents"].(map[string]interface{})
+	value := contents["value"].(string)
+	if !strings.Contains(value, "Template:") {
+		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "Resolved:") {
+		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	}
+	expectedStack := "ex1-orgs/ex1/plat/dev/us-east-2"
+	if !strings.Contains(value, expectedStack) {
+		t.Fatalf("expected resolved stack name '%s' in hover, got: %s", expectedStack, value)
 	}
 }
 
@@ -561,6 +707,402 @@ func TestHandleCodeAction_Scaffold(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected scaffold code action, got %+v", actions)
+	}
+}
+
+func TestDiagnostics_UnknownTemplateVariable(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\ncomponents:\n  terraform:\n    database:\n      vars:\n        test: \"{{ .namespac }}\"\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	if len(diags) == 0 {
+		t.Fatal("expected diagnostics for unknown template variable")
+	}
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "namespac") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected error diagnostic for '.namespac', got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_KnownTemplateVariable(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\ncomponents:\n  terraform:\n    database:\n      vars:\n        test: \"{{ .namespace }}\"\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	for _, d := range diags {
+		if strings.Contains(d.Message, "namespace") {
+			t.Fatalf("unexpected diagnostic for known variable: %+v", d)
+		}
+	}
+}
+
+func TestDiagnostics_UnknownTemplateVariable_VarsPrefix(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\ncomponents:\n  terraform:\n    database:\n      vars:\n        test: \"{{ .vars.unknwn }}\"\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, ".vars.unknwn") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected error diagnostic for '.vars.unknwn', got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_DuplicateImport(t *testing.T) {
+	dir := t.TempDir()
+	defaultsPath := filepath.Join(dir, "stacks/dev/defaults.yaml")
+	os.MkdirAll(filepath.Dir(defaultsPath), 0755)
+	os.WriteFile(defaultsPath, []byte("vars:\n  namespace: dev\n"), 0644)
+
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.WriteFile(stackPath, []byte("import:\n  - defaults\n  - defaults\nvars:\n  x: 1\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityWarning && strings.Contains(d.Message, "Duplicate import") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected duplicate import diagnostic, got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_CircularImport(t *testing.T) {
+	dir := t.TempDir()
+	aPath := filepath.Join(dir, "stacks/a.yaml")
+	bPath := filepath.Join(dir, "stacks/b.yaml")
+	os.MkdirAll(filepath.Dir(aPath), 0755)
+	os.WriteFile(aPath, []byte("import:\n  - b\nvars:\n  x: 1\n"), 0644)
+	os.WriteFile(bPath, []byte("import:\n  - a\nvars:\n  y: 2\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(aPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(aPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "Circular import") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected circular import diagnostic, got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_EmptyImport(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  x: 1\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityHint && strings.Contains(d.Message, "No imports defined") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected empty import hint, got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_InvalidComponentName(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    'bad:name':\n      vars:\n        x: 1\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "invalid characters") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected invalid component name diagnostic, got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_InvalidMetadataType(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    vpc:\n      metadata:\n        type: abtract\n      vars:\n        x: 1\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "metadata.type must be") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected invalid metadata.type diagnostic, got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_DuplicateComponentName(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    vpc:\n      vars:\n        x: 1\n    vpc:\n      vars:\n        y: 2\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "Duplicate component name") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected duplicate component name diagnostic, got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_InvalidBackendType(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("terraform:\n  backend_type: s4\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "Invalid backend_type") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected invalid backend_type diagnostic, got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_ValidBackendType(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("terraform:\n  backend_type: s3\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	for _, d := range diags {
+		if strings.Contains(d.Message, "backend_type") {
+			t.Fatalf("unexpected diagnostic for valid backend_type: %+v", d)
+		}
+	}
+}
+
+func TestDiagnostics_SettingsDependsOn_MissingComponent(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    vpc:\n      settings:\n        depends_on:\n          1:\n            component: nonexistent\n      vars:\n        x: 1\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	found := false
+	for _, d := range diags {
+		if d.Severity == SeverityError && strings.Contains(d.Message, "settings.depends_on references component") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected settings.depends_on missing component diagnostic, got: %+v", diags)
+	}
+}
+
+func TestDiagnostics_SettingsDependsOn_ValidComponent(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    vpc:\n      settings:\n        depends_on:\n          1:\n            component: other\n      vars:\n        x: 1\n    other:\n      vars:\n        y: 2\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	f := idx.GetFile(stackPath)
+	if f == nil {
+		t.Fatal("expected file in index")
+	}
+
+	diags := runBestPracticeChecks(f, filepath.Dir(stackPath), idx)
+	for _, d := range diags {
+		if strings.Contains(d.Message, "settings.depends_on") {
+			t.Fatalf("unexpected diagnostic for valid settings.depends_on: %+v", d)
+		}
 	}
 }
 
