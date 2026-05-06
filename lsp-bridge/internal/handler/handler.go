@@ -826,6 +826,10 @@ func (hb *hoverBuilder) note(text string) {
 	hb.sections = append(hb.sections, fmt.Sprintf("> %s", text))
 }
 
+func (hb *hoverBuilder) kv(key, val string) {
+	hb.sections = append(hb.sections, fmt.Sprintf("**%s**: %s", key, val))
+}
+
 func (hb *hoverBuilder) build() string {
 	return strings.Join(hb.sections, "\n\n")
 }
@@ -878,7 +882,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 					hb.rule()
 					hb.header("Vars from this import")
 					for _, v := range importVars {
-						hb.bullet(fmt.Sprintf("`%s`: `%s`", v.Key, v.Value))
+						hb.kv(v.Key, v.Value)
 					}
 				}
 
@@ -921,7 +925,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 						}
 						sort.Strings(keys)
 						for _, k := range keys {
-							hb.bullet(fmt.Sprintf("`%s`: `%s`", k, vars[k]))
+							hb.kv(k, vars[k])
 						}
 					}
 
@@ -1036,7 +1040,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
-				hb.bullet(fmt.Sprintf("`%s`: `%s`", k, vars[k]))
+				hb.kv(k, vars[k])
 			}
 			hb.note("Hover over individual imports to see which file contributed each variable.")
 			hoverContent = map[string]interface{}{
