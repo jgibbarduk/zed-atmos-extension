@@ -95,6 +95,8 @@ func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, 
 		return h.handleRename(content)
 	case "textDocument/codeAction":
 		return h.handleCodeAction(content)
+	case "textDocument/completion":
+		return h.handleCompletion(content)
 	case "textDocument/didOpen", "textDocument/didChange", "textDocument/didSave":
 		return h.handleDiagnostics(content)
 	}
@@ -618,6 +620,164 @@ func (h *LSPHandler) handleCodeAction(content []byte) (bool, []byte, [][]byte, e
 	}
 	b, _ := json.Marshal(resp)
 	return true, b, nil, nil
+}
+
+func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, error) {
+	var req struct {
+		JSONRPC string                     `json:"jsonrpc"`
+		ID      json.RawMessage            `json:"id"`
+		Params  textDocumentPositionParams `json:"params"`
+	}
+	if err := json.Unmarshal(content, &req); err != nil {
+		return true, errorResponse(content, -32602, "Invalid params"), nil, nil
+	}
+
+	path := strings.TrimPrefix(req.Params.TextDocument.URI, "file://")
+	basePath := h.idx.BasePath()
+	if basePath == "" {
+		return true, emptyResult(content, req.ID), nil, nil
+	}
+
+	// Read the current line to detect what the user is typing.
+	var lineText string
+	documentContentMu.RLock()
+	if docContent, ok := documentContent[path]; ok {
+		lines := strings.Split(string(docContent), "\n")
+		if int(req.Params.Position.Line) < len(lines) {
+			lineText = lines[req.Params.Position.Line]
+		}
+	}
+	documentContentMu.RUnlock()
+	if lineText == "" {
+		if contentBytes, err := os.ReadFile(path); err == nil {
+			lines := strings.Split(string(contentBytes), "\n")
+			if int(req.Params.Position.Line) < len(lines) {
+				lineText = lines[req.Params.Position.Line]
+			}
+		}
+	}
+	if lineText == "" {
+		return true, emptyResult(content, req.ID), nil, nil
+	}
+
+	// Extract the partial path the user is typing.
+	// Look for a quoted or unquoted path fragment on the current line.
+	partial := extractPartialPath(lineText, int(req.Params.Position.Character))
+	if partial == "" {
+		return true, emptyResult(content, req.ID), nil, nil
+	}
+
+	// Walk the base path and find matching .yaml files.
+	items := findPathCompletions(basePath, partial)
+	if len(items) == 0 {
+		return true, emptyResult(content, req.ID), nil, nil
+	}
+
+	result := map[string]interface{}{
+		"isIncomplete": len(items) > 20,
+		"items":        items,
+	}
+	resultBytes, _ := json.Marshal(result)
+	resp := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"result":  json.RawMessage(resultBytes),
+	}
+	b, _ := json.Marshal(resp)
+	return true, b, nil, nil
+}
+
+// extractPartialPath pulls out the path fragment the user is currently typing.
+// It looks backward from the cursor position for the start of a word/path.
+func extractPartialPath(line string, cursor int) string {
+	if cursor > len(line) {
+		cursor = len(line)
+	}
+	// Find the start of the current token by walking backwards until we hit
+	// a character that can't be part of a path.
+	start := cursor
+	for start > 0 {
+		c := line[start-1]
+		if c == ' ' || c == '\t' || c == '-' || c == ':' || c == '"' || c == '\'' {
+			break
+		}
+		start--
+	}
+	// Trim leading quote if present.
+	if start < len(line) && (line[start] == '"' || line[start] == '\'') {
+		start++
+	}
+	if start >= cursor {
+		return ""
+	}
+	return line[start:cursor]
+}
+
+// findPathCompletions walks the stacks directory and returns matching paths.
+func findPathCompletions(basePath, partial string) []map[string]interface{} {
+	var items []map[string]interface{}
+	// If the user typed "catalog/", look inside basePath/catalog/.
+	// If they typed "mixins/region/", look inside basePath/mixins/region/.
+	searchDir := filepath.Join(basePath, partial)
+	info, err := os.Stat(searchDir)
+	if err != nil || !info.IsDir() {
+		// Partial is not an existing directory; try its parent.
+		searchDir = filepath.Join(basePath, filepath.Dir(partial))
+		info, err = os.Stat(searchDir)
+		if err != nil || !info.IsDir() {
+			return nil
+		}
+	}
+
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil
+	}
+
+	prefix := ""
+	if partial != "" && !strings.HasSuffix(partial, "/") && !strings.HasSuffix(partial, string(filepath.Separator)) {
+		prefix = filepath.Base(partial)
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(name, prefix) {
+			continue
+		}
+
+		rel, _ := filepath.Rel(basePath, filepath.Join(searchDir, name))
+		if rel == "" {
+			continue
+		}
+		// Strip .yaml / .yml suffix for cleaner labels.
+		label := rel
+		if strings.HasSuffix(label, ".yaml") {
+			label = strings.TrimSuffix(label, ".yaml")
+		} else if strings.HasSuffix(label, ".yml") {
+			label = strings.TrimSuffix(label, ".yml")
+		}
+
+		// Only show directories and yaml files.
+		if entry.IsDir() {
+			items = append(items, map[string]interface{}{
+				"label":      label + "/",
+				"kind":       19, // Folder
+				"detail":     "Directory",
+				"insertText": label + "/",
+			})
+		} else if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
+			items = append(items, map[string]interface{}{
+				"label":      label,
+				"kind":       17, // File
+				"detail":     "Stack file",
+				"insertText": label,
+			})
+		}
+	}
+	return items
 }
 
 func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error) {
