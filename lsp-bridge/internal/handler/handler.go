@@ -667,8 +667,15 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 		return true, emptyResult(content, req.ID), nil, nil
 	}
 
+	// Compute the range of the partial path so the completion can replace it.
+	partialStartChar := int(req.Params.Position.Character) - len(partial)
+	replaceRange := lsp.Range{
+		Start: lsp.Position{Line: req.Params.Position.Line, Character: uint32(partialStartChar)},
+		End:   lsp.Position{Line: req.Params.Position.Line, Character: req.Params.Position.Character},
+	}
+
 	// Walk the base path and find matching .yaml files.
-	items := findPathCompletions(basePath, partial)
+	items := findPathCompletions(basePath, partial, replaceRange)
 	if len(items) == 0 {
 		return true, emptyResult(content, req.ID), nil, nil
 	}
@@ -714,7 +721,7 @@ func extractPartialPath(line string, cursor int) string {
 }
 
 // findPathCompletions walks the stacks directory and returns matching paths.
-func findPathCompletions(basePath, partial string) []map[string]interface{} {
+func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map[string]interface{} {
 	var items []map[string]interface{}
 	// If the user typed "catalog/", look inside basePath/catalog/.
 	// If they typed "mixins/region/", look inside basePath/mixins/region/.
@@ -763,17 +770,23 @@ func findPathCompletions(basePath, partial string) []map[string]interface{} {
 		// Only show directories and yaml files.
 		if entry.IsDir() {
 			items = append(items, map[string]interface{}{
-				"label":      label + "/",
-				"kind":       19, // Folder
-				"detail":     "Directory",
-				"insertText": label + "/",
+				"label":  label + "/",
+				"kind":   19, // Folder
+				"detail": "Directory",
+				"textEdit": map[string]interface{}{
+					"range":   replaceRange,
+					"newText": label + "/",
+				},
 			})
 		} else if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
 			items = append(items, map[string]interface{}{
-				"label":      label,
-				"kind":       17, // File
-				"detail":     "Stack file",
-				"insertText": label,
+				"label":  label,
+				"kind":   17, // File
+				"detail": "Stack file",
+				"textEdit": map[string]interface{}{
+					"range":   replaceRange,
+					"newText": label,
+				},
 			})
 		}
 	}
