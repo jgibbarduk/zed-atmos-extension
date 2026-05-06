@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
+	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
 )
 
 var componentNamePattern = regexp.MustCompile(`^[/a-zA-Z0-9-_{}. ]+$`)
@@ -17,10 +18,10 @@ var validBackendTypes = map[string]bool{
 }
 
 type Diagnostic struct {
-	Severity uint32     `json:"severity"`
-	Message  string     `json:"message"`
-	Range    index.Range `json:"range"`
-	Source   string     `json:"source"`
+	Severity uint32   `json:"severity"`
+	Message  string   `json:"message"`
+	Range    lsp.Range `json:"range"`
+	Source   string   `json:"source"`
 }
 
 const (
@@ -43,7 +44,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityHint,
 				Message:  "Consider adding a `_defaults.yaml` at this level for shared settings",
-				Range:    index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0},
+				Range: toLSPRange(index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}),
 				Source:   "atmos-best-practice",
 			})
 		}
@@ -54,7 +55,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 		diags = append(diags, Diagnostic{
 			Severity: SeverityHint,
 			Message:  "No imports defined — consider importing base settings",
-			Range:    index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0},
+			Range: toLSPRange(index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}),
 			Source:   "atmos-best-practice",
 		})
 	}
@@ -66,7 +67,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("Duplicate component name '%s' in this file", comp.Name),
-				Range:    comp.Range,
+				Range: toLSPRange(comp.Range),
 				Source:   "atmos-component",
 			})
 			_ = prev
@@ -81,7 +82,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("Component name '%s' contains invalid characters (must match ^[/a-zA-Z0-9-_{}. ]+$)", comp.Name),
-				Range:    comp.Range,
+				Range: toLSPRange(comp.Range),
 				Source:   "atmos-component",
 			})
 		}
@@ -93,7 +94,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("metadata.type must be 'abstract' or 'real', got '%s'", meta.Type),
-				Range:    meta.Range,
+				Range: toLSPRange(meta.Range),
 				Source:   "atmos-schema",
 			})
 		}
@@ -106,7 +107,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("Invalid %s '%s' (must be one of: local, s3, remote, vault, static, azurerm, gcs, cloud)", kind, bt.Type),
-				Range:    bt.Range,
+				Range: toLSPRange(bt.Range),
 				Source:   "atmos-schema",
 			})
 		}
@@ -122,7 +123,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("settings.depends_on references component '%s' which was not found", sd.Component),
-				Range:    sd.Range,
+				Range: toLSPRange(sd.Range),
 				Source:   "atmos-deps",
 			})
 		}
@@ -135,7 +136,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("Import '%s' cannot be resolved", imp.RawPath),
-				Range:    imp.Range,
+				Range: toLSPRange(imp.Range),
 				Source:   "atmos-import",
 			})
 		}
@@ -149,7 +150,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 				diags = append(diags, Diagnostic{
 					Severity: SeverityHint,
 					Message:  "Base imports should come first; later imports override earlier",
-					Range:    imp.Range,
+					Range: toLSPRange(imp.Range),
 					Source:   "atmos-best-practice",
 				})
 			}
@@ -162,7 +163,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityWarning,
 				Message:  fmt.Sprintf("Version '%s' should be quoted to prevent YAML float parsing", v.Value),
-				Range:    v.Range,
+				Range: toLSPRange(v.Range),
 				Source:   "atmos-version",
 			})
 		}
@@ -174,7 +175,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityHint,
 				Message:  "Consider using a catalog (" + filepath.Join(idx.BasePath(), "catalog") + ") for reusable component blueprints",
-				Range:    comp.Range,
+				Range: toLSPRange(comp.Range),
 				Source:   "atmos-best-practice",
 			})
 		}
@@ -188,7 +189,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 				diags = append(diags, Diagnostic{
 					Severity: SeverityWarning,
 					Message:  fmt.Sprintf("Abstract component '%s' has no inheritors", meta.Component),
-					Range:    meta.Range,
+					Range: toLSPRange(meta.Range),
 					Source:   "atmos-abstract",
 				})
 			}
@@ -205,7 +206,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("Dependency component '%s' not found", dep.Component),
-				Range:    dep.Range,
+				Range: toLSPRange(dep.Range),
 				Source:   "atmos-deps",
 			})
 		}
@@ -227,7 +228,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityWarning,
 				Message:  fmt.Sprintf("!terraform.state references '%s' but it is not declared in dependencies.components", ts.Component),
-				Range:    ts.Range,
+				Range: toLSPRange(ts.Range),
 				Source:   "atmos-deps",
 			})
 		}
@@ -251,7 +252,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 					diags = append(diags, Diagnostic{
 						Severity: SeverityError,
 						Message:  fmt.Sprintf("Unknown template variable '.vars.%s'", key),
-						Range:    v.Range,
+						Range: toLSPRange(v.Range),
 						Source:   "atmos-template",
 					})
 				}
@@ -271,7 +272,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 					diags = append(diags, Diagnostic{
 						Severity: SeverityError,
 						Message:  fmt.Sprintf("Unknown template variable '.%s'", key),
-						Range:    v.Range,
+						Range: toLSPRange(v.Range),
 						Source:   "atmos-template",
 					})
 				}
@@ -286,7 +287,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			diags = append(diags, Diagnostic{
 				Severity: SeverityWarning,
 				Message:  fmt.Sprintf("Duplicate import '%s'", imp.RawPath),
-				Range:    imp.Range,
+				Range: toLSPRange(imp.Range),
 				Source:   "atmos-import",
 			})
 			_ = prev
@@ -300,7 +301,7 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 		diags = append(diags, Diagnostic{
 			Severity: SeverityError,
 			Message:  "Circular import detected in this stack file",
-			Range:    index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0},
+			Range: toLSPRange(index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}),
 			Source:   "atmos-import",
 		})
 	}

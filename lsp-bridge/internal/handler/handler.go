@@ -905,7 +905,7 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 	diags := runBestPracticeChecks(f, filepath.Dir(path), h.idx)
 	log.Printf("diagnostics: found %d issues for %s", len(diags), path)
 	for i, d := range diags {
-		log.Printf("diagnostics: [%d] %s (line %d)", i, d.Message, d.Range.StartLine)
+		log.Printf("diagnostics: [%d] %s (line %d)", i, d.Message, d.Range.Start.Line)
 	}
 
 	notification := map[string]interface{}{
