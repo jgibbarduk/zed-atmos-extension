@@ -2,4 +2,5 @@
 /extension.wasm
 /grammars/
 /lsp-bridge/atmos-lsp-bridge
+/lsp-bridge/atmos-lsp-bridge-test
 /.worktrees/
