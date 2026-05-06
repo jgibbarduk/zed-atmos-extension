@@ -167,11 +167,11 @@ func TestHandleHover_ComponentWithStackName(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Component:") {
-		t.Fatalf("expected 'Component:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Component") {
+		t.Fatalf("expected '## Component' in hover, got: %s", value)
 	}
-	if !strings.Contains(value, "Stack name:") {
-		t.Fatalf("expected 'Stack name:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Stack name preview") {
+		t.Fatalf("expected '## Stack name preview' in hover, got: %s", value)
 	}
 	if !strings.Contains(value, "dev-staging") {
 		t.Fatalf("expected resolved stack name 'dev-staging' in hover, got: %s", value)
@@ -213,11 +213,11 @@ func TestHandleHover_TemplateExpression(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Template:") {
-		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Template expression") {
+		t.Fatalf("expected '## Template expression' in hover, got: %s", value)
 	}
-	if !strings.Contains(value, "Resolved:") {
-		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Resolved value") {
+		t.Fatalf("expected '## Resolved value' in hover, got: %s", value)
 	}
 	if !strings.Contains(value, "dev_db") {
 		t.Fatalf("expected resolved value 'dev_db' in hover, got: %s", value)
@@ -259,11 +259,11 @@ func TestHandleHover_TemplateExpression_AtmosComponent(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Template:") {
-		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Template expression") {
+		t.Fatalf("expected '## Template expression' in hover, got: %s", value)
 	}
-	if !strings.Contains(value, "Resolved:") {
-		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Resolved value") {
+		t.Fatalf("expected '## Resolved value' in hover, got: %s", value)
 	}
 	if !strings.Contains(value, "database") {
 		t.Fatalf("expected resolved value 'database' in hover, got: %s", value)
@@ -305,8 +305,8 @@ func TestHandleHover_ComponentWithAtmosComponentStackName(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Stack name:") {
-		t.Fatalf("expected 'Stack name:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Stack name preview") {
+		t.Fatalf("expected '## Stack name preview' in hover, got: %s", value)
 	}
 	if !strings.Contains(value, "dev-database") {
 		t.Fatalf("expected resolved stack name 'dev-database' in hover, got: %s", value)
@@ -348,11 +348,11 @@ func TestHandleHover_TemplateExpression_DirectKey(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Template:") {
-		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Template expression") {
+		t.Fatalf("expected '## Template expression' in hover, got: %s", value)
 	}
-	if !strings.Contains(value, "Resolved:") {
-		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Resolved value") {
+		t.Fatalf("expected '## Resolved value' in hover, got: %s", value)
 	}
 	if !strings.Contains(value, "dev") {
 		t.Fatalf("expected resolved value 'dev' in hover, got: %s", value)
@@ -394,8 +394,8 @@ func TestHandleHover_TemplateExpression_NonVarsBlock(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Template:") {
-		t.Fatalf("expected 'Template:' in hover for non-vars block expression, got: %s", value)
+	if !strings.Contains(value, "## Template expression") {
+		t.Fatalf("expected '## Template expression' in hover for non-vars block expression, got: %s", value)
 	}
 	if !strings.Contains(value, "{{ .atmos_component }}") {
 		t.Fatalf("expected template expression in hover, got: %s", value)
@@ -438,11 +438,11 @@ func TestHandleHover_TemplateExpression_MultiExpressionLine(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Template:") {
-		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Template expression") {
+		t.Fatalf("expected '## Template expression' in hover, got: %s", value)
 	}
-	if !strings.Contains(value, "Resolved:") {
-		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Resolved value") {
+		t.Fatalf("expected '## Resolved value' in hover, got: %s", value)
 	}
 	if !strings.Contains(value, "plat-dev") {
 		t.Fatalf("expected resolved value 'plat-dev' (with dash preserved), got: %s", value)
@@ -490,11 +490,11 @@ func TestHandleHover_TemplateExpression_AtmosStack(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Template:") {
-		t.Fatalf("expected 'Template:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Template expression") {
+		t.Fatalf("expected '## Template expression' in hover, got: %s", value)
 	}
-	if !strings.Contains(value, "Resolved:") {
-		t.Fatalf("expected 'Resolved:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Resolved value") {
+		t.Fatalf("expected '## Resolved value' in hover, got: %s", value)
 	}
 	expectedStack := "ex1-orgs/ex1/plat/dev/us-east-2"
 	if !strings.Contains(value, expectedStack) {
@@ -1144,8 +1144,8 @@ func TestHandleHover_Import(t *testing.T) {
 	extractResult(resp, &result)
 	contents := result["contents"].(map[string]interface{})
 	value := contents["value"].(string)
-	if !strings.Contains(value, "Import:") {
-		t.Fatalf("expected 'Import:' in hover, got: %s", value)
+	if !strings.Contains(value, "## Import") {
+		t.Fatalf("expected '## Import' in hover, got: %s", value)
 	}
 	if !strings.Contains(value, "defaults") {
 		t.Fatalf("expected import path 'defaults' in hover, got: %s", value)

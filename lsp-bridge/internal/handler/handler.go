@@ -793,6 +793,43 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 	return items
 }
 
+// hoverBuilder assembles structured markdown hover content.
+type hoverBuilder struct {
+	sections []string
+}
+
+func (hb *hoverBuilder) header(title string) {
+	hb.sections = append(hb.sections, fmt.Sprintf("## %s", title))
+}
+
+func (hb *hoverBuilder) codeBlock(lang, code string) {
+	hb.sections = append(hb.sections, fmt.Sprintf("```%s\n%s\n```", lang, code))
+}
+
+func (hb *hoverBuilder) inlineCode(code string) {
+	hb.sections = append(hb.sections, fmt.Sprintf("`%s`", code))
+}
+
+func (hb *hoverBuilder) paragraph(text string) {
+	hb.sections = append(hb.sections, text)
+}
+
+func (hb *hoverBuilder) bullet(text string) {
+	hb.sections = append(hb.sections, fmt.Sprintf("- %s", text))
+}
+
+func (hb *hoverBuilder) rule() {
+	hb.sections = append(hb.sections, "---")
+}
+
+func (hb *hoverBuilder) note(text string) {
+	hb.sections = append(hb.sections, fmt.Sprintf("> %s", text))
+}
+
+func (hb *hoverBuilder) build() string {
+	return strings.Join(hb.sections, "\n\n")
+}
+
 func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error) {
 	var req struct {
 		JSONRPC string                     `json:"jsonrpc"`
@@ -812,19 +849,24 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 		for _, imp := range f.Imports {
 			if imp.Range.StartLine <= req.Params.Position.Line && imp.Range.EndLine >= req.Params.Position.Line {
 				resolved := h.idx.ResolveImport(imp.RawPath, filepath.Dir(path))
-				value := fmt.Sprintf("**Import:** `%s`\n\n", imp.RawPath)
+				hb := hoverBuilder{}
+				hb.header("Import")
+				hb.codeBlock("yaml", imp.RawPath)
+
 				if len(resolved) > 0 {
-					value += "**Resolves to:**\n"
+					hb.rule()
+					hb.header("Resolves to")
 					for _, r := range resolved {
 						rel, err := filepath.Rel(h.projectRoot, r)
 						if err != nil {
 							rel = r
 						}
-						value += fmt.Sprintf("- `%s`\n", rel)
+						hb.bullet(fmt.Sprintf("`%s`", rel))
 					}
 				} else {
-					value += "*Unable to resolve path*"
+					hb.note("Unable to resolve path")
 				}
+
 				var importVars []index.VarNode
 				for _, r := range resolved {
 					parent := h.idx.GetFile(r)
@@ -833,14 +875,16 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 					}
 				}
 				if len(importVars) > 0 {
-					value += "\n**Vars from this import:**\n"
+					hb.rule()
+					hb.header("Vars from this import")
 					for _, v := range importVars {
-						value += fmt.Sprintf("- `%s`: `%s`\n", v.Key, v.Value)
+						hb.bullet(fmt.Sprintf("`%s`: `%s`", v.Key, v.Value))
 					}
 				}
+
 				hoverContent = map[string]interface{}{
 					"kind":  "markdown",
-					"value": value,
+					"value": hb.build(),
 				}
 				break
 			}
@@ -849,41 +893,51 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			for _, comp := range f.Comps {
 				if comp.Range.StartLine <= req.Params.Position.Line && comp.Range.EndLine >= req.Params.Position.Line {
 					definitions := h.idx.FindComponent(comp.Name)
-					value := fmt.Sprintf("**Component:** `%s`\n\n", comp.Name)
+					hb := hoverBuilder{}
+					hb.header("Component")
+					hb.codeBlock("yaml", comp.Name)
+
 					if len(definitions) > 1 {
-						value += "**Also defined in:**\n"
+						hb.rule()
+						hb.header("Also defined in")
 						for _, sf := range definitions {
 							if sf.Path != path {
 								rel, err := filepath.Rel(h.projectRoot, sf.Path)
 								if err != nil {
 									rel = sf.Path
 								}
-								value += fmt.Sprintf("- `%s`\n", rel)
+								hb.bullet(fmt.Sprintf("`%s`", rel))
 							}
 						}
 					}
-					// Show accumulated vars for this component
+
 					vars := collectVars(f, h.idx)
 					if len(vars) > 0 {
+						hb.rule()
+						hb.header("Accumulated vars")
 						keys := make([]string, 0, len(vars))
 						for k := range vars {
 							keys = append(keys, k)
 						}
 						sort.Strings(keys)
-						value += "\n**Accumulated vars:**\n"
 						for _, k := range keys {
-							value += fmt.Sprintf("- `%s`: `%s`\n", k, vars[k])
+							hb.bullet(fmt.Sprintf("`%s`: `%s`", k, vars[k]))
 						}
 					}
+
 					if h.nameTemplate != "" {
 						preview := interpolateNameTemplate(h.nameTemplate, vars, comp.Name)
 						if preview != "" {
-							value += fmt.Sprintf("\n\n**Stack name:** `%s`\n\nComputed from `atmos.yaml` `name_template` with accumulated vars.", preview)
+							hb.rule()
+							hb.header("Stack name preview")
+							hb.codeBlock("", preview)
+							hb.note(fmt.Sprintf("Computed from `atmos.yaml` `name_template` with accumulated vars."))
 						}
 					}
+
 					hoverContent = map[string]interface{}{
 						"kind":  "markdown",
-						"value": value,
+						"value": hb.build(),
 					}
 					break
 				}
@@ -895,13 +949,17 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 					if strings.Contains(v.Value, "{{") && strings.Contains(v.Value, "}}") {
 						expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character, h.nameTemplate)
 						if expr != "" {
-							value := fmt.Sprintf("**Template:** `%s`", expr)
+							hb := hoverBuilder{}
+							hb.header("Template expression")
+							hb.codeBlock("go", expr)
 							if resolved != "" && resolved != expr {
-								value += fmt.Sprintf("\n\n**Resolved:** `%s`", resolved)
+								hb.rule()
+								hb.header("Resolved value")
+								hb.codeBlock("", resolved)
 							}
 							hoverContent = map[string]interface{}{
 								"kind":  "markdown",
-								"value": value,
+								"value": hb.build(),
 							}
 							break
 						}
@@ -912,13 +970,17 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			if hoverContent == nil {
 				expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character, h.nameTemplate)
 				if expr != "" {
-					value := fmt.Sprintf("**Template:** `%s`", expr)
+					hb := hoverBuilder{}
+					hb.header("Template expression")
+					hb.codeBlock("go", expr)
 					if resolved != "" && resolved != expr {
-						value += fmt.Sprintf("\n\n**Resolved:** `%s`", resolved)
+						hb.rule()
+						hb.header("Resolved value")
+						hb.codeBlock("", resolved)
 					}
 					hoverContent = map[string]interface{}{
 						"kind":  "markdown",
-						"value": value,
+						"value": hb.build(),
 					}
 				}
 			}
@@ -929,24 +991,32 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 					if ts.Component == "" {
 						continue
 					}
-					value := fmt.Sprintf("**Remote state reference:** `%s`\n", ts.Component)
+					hb := hoverBuilder{}
+					hb.header("Remote state reference")
+					hb.codeBlock("yaml", ts.Component)
+
 					if ts.JQExpr != "" {
-						value += fmt.Sprintf("\nJQ expression: `%s`\n", ts.JQExpr)
+						hb.rule()
+						hb.header("JQ expression")
+						hb.codeBlock("jq", ts.JQExpr)
 					}
+
 					refs := h.idx.FindComponent(ts.Component)
 					if len(refs) > 0 {
-						value += "\n**Component defined in:**\n"
+						hb.rule()
+						hb.header("Component defined in")
 						for _, ref := range refs {
 							rel, err := filepath.Rel(h.projectRoot, ref.Path)
 							if err != nil {
 								rel = ref.Path
 							}
-							value += fmt.Sprintf("- `%s`\n", rel)
+							hb.bullet(fmt.Sprintf("`%s`", rel))
 						}
 					}
+
 					hoverContent = map[string]interface{}{
 						"kind":  "markdown",
-						"value": value,
+						"value": hb.build(),
 					}
 					break
 				}
@@ -958,19 +1028,20 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 	if hoverContent == nil && h.nameTemplate != "" && f != nil && len(f.Comps) > 0 {
 		vars := collectVars(f, h.idx)
 		if len(vars) > 0 {
-			value := "**Resolved variables for this stack:**\n\n"
+			hb := hoverBuilder{}
+			hb.header("Resolved variables for this stack")
 			keys := make([]string, 0, len(vars))
 			for k := range vars {
 				keys = append(keys, k)
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
-				value += fmt.Sprintf("- `%s`: `%s`\n", k, vars[k])
+				hb.bullet(fmt.Sprintf("`%s`: `%s`", k, vars[k]))
 			}
-			value += "\n*Hover over individual imports to see which file contributed each variable.*"
+			hb.note("Hover over individual imports to see which file contributed each variable.")
 			hoverContent = map[string]interface{}{
 				"kind":  "markdown",
-				"value": value,
+				"value": hb.build(),
 			}
 		}
 	}
