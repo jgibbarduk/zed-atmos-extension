@@ -930,7 +930,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 						sort.Strings(keys)
 						var lines []string
 						for _, k := range keys {
-							lines = append(lines, fmt.Sprintf("%s: %s", k, vars[k]))
+							lines = append(lines, fmt.Sprintf("- %s: %s", k, vars[k]))
 						}
 						hb.yamlBlock(lines)
 					}
@@ -1047,7 +1047,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			sort.Strings(keys)
 			var lines []string
 			for _, k := range keys {
-				lines = append(lines, fmt.Sprintf("%s: %s", k, vars[k]))
+				lines = append(lines, fmt.Sprintf("- %s: %s", k, vars[k]))
 			}
 			hb.yamlBlock(lines)
 			hb.note("Hover over individual imports to see which file contributed each variable.")
