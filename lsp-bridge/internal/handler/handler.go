@@ -827,7 +827,11 @@ func (hb *hoverBuilder) note(text string) {
 }
 
 func (hb *hoverBuilder) kv(key, val string) {
-	hb.sections = append(hb.sections, fmt.Sprintf("**%s**: %s", key, val))
+	hb.sections = append(hb.sections, fmt.Sprintf("- **%s**: %s", key, val))
+}
+
+func (hb *hoverBuilder) yamlBlock(lines []string) {
+	hb.sections = append(hb.sections, fmt.Sprintf("```yaml\n%s\n```", strings.Join(lines, "\n")))
 }
 
 func (hb *hoverBuilder) build() string {
@@ -924,9 +928,11 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 							keys = append(keys, k)
 						}
 						sort.Strings(keys)
+						var lines []string
 						for _, k := range keys {
-							hb.kv(k, vars[k])
+							lines = append(lines, fmt.Sprintf("%s: %s", k, vars[k]))
 						}
+						hb.yamlBlock(lines)
 					}
 
 					if h.nameTemplate != "" {
@@ -1039,9 +1045,11 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 				keys = append(keys, k)
 			}
 			sort.Strings(keys)
+			var lines []string
 			for _, k := range keys {
-				hb.kv(k, vars[k])
+				lines = append(lines, fmt.Sprintf("%s: %s", k, vars[k]))
 			}
+			hb.yamlBlock(lines)
 			hb.note("Hover over individual imports to see which file contributed each variable.")
 			hoverContent = map[string]interface{}{
 				"kind":  "markdown",
