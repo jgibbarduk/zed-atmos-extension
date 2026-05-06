@@ -202,11 +202,23 @@ func extractDependencies(compNode *yaml.Node, sf *StackFile) {
 				continue
 			}
 			for _, item := range depVal.Content {
-				if item.Kind == yaml.ScalarNode {
+				switch item.Kind {
+				case yaml.ScalarNode:
 					sf.Deps = append(sf.Deps, DepNode{
 						Component: item.Value,
 						Range:     nodeRange(item),
 					})
+				case yaml.MappingNode:
+					for k := 0; k < len(item.Content)-1; k += 2 {
+						subKey := item.Content[k]
+						subVal := item.Content[k+1]
+						if subKey.Value == "component" && subVal != nil && subVal.Kind == yaml.ScalarNode {
+							sf.Deps = append(sf.Deps, DepNode{
+								Component: subVal.Value,
+								Range:     nodeRange(subVal),
+							})
+						}
+					}
 				}
 			}
 		}
