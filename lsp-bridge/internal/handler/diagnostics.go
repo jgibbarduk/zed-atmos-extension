@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -121,6 +122,36 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 				Range:    toLSPRange(meta.Range),
 				Source:   "atmos-schema",
 			})
+		}
+	}
+
+	// Check 5a: metadata.component directory existence
+	for _, meta := range file.Metadata {
+		if meta.Component != "" {
+			compDir := filepath.Join(idx.BasePath(), "components", meta.Component)
+			if _, err := os.Stat(compDir); os.IsNotExist(err) {
+				diags = append(diags, diagnostic{
+					Severity: SeverityError,
+					Message:  fmt.Sprintf("metadata.component '%s' does not exist at %s", meta.Component, compDir),
+					Range:    toLSPRange(meta.ComponentRange),
+					Source:   "atmos-component",
+				})
+			}
+		}
+	}
+
+	// Check 5b: metadata.inherits component existence
+	for _, meta := range file.Metadata {
+		if meta.Inherits != "" {
+			refs := idx.FindComponent(meta.Inherits)
+			if len(refs) == 0 {
+				diags = append(diags, diagnostic{
+					Severity: SeverityWarning,
+					Message:  fmt.Sprintf("Inherited component '%s' not found", meta.Inherits),
+					Range:    toLSPRange(meta.InheritsRange),
+					Source:   "atmos-inherit",
+				})
+			}
 		}
 	}
 
@@ -252,9 +283,17 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			}
 		}
 		if !found {
+			for _, dep := range file.SettingsDeps {
+				if dep.Component == ts.Component {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
 			diags = append(diags, diagnostic{
 				Severity: SeverityWarning,
-				Message:  fmt.Sprintf("!terraform.state references '%s' but it is not declared in dependencies.components", ts.Component),
+				Message:  fmt.Sprintf("!terraform.state references '%s' but it is not declared in dependencies.components or settings.depends_on", ts.Component),
 				Range:    toLSPRange(ts.Range),
 				Source:   "atmos-deps",
 			})

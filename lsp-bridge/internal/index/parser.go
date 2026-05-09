@@ -3,6 +3,7 @@ package index
 import (
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,16 +48,26 @@ func ParseYAMLContent(path string, content []byte) *StackFile {
 			extractVars(val, sf, "")
 		}
 
-		if keyStr == "components" && val != nil && val.Kind == yaml.MappingNode {
-			extractComponents(val, sf)
+		if keyStr == "terraform" && val != nil && val.Kind == yaml.MappingNode {
+			extractComponentTypeVars(val, sf, "terraform")
+			extractBackendTypes(val, sf, "")
 		}
 
-		if keyStr == "terraform" && val != nil && val.Kind == yaml.MappingNode {
-			extractBackendTypes(val, sf, "")
+		if keyStr == "helmfile" && val != nil && val.Kind == yaml.MappingNode {
+			extractComponentTypeVars(val, sf, "helmfile")
+		}
+
+		if keyStr == "overrides" && val != nil && val.Kind == yaml.MappingNode {
+			extractOverrides(val, sf)
+		}
+
+		if keyStr == "components" && val != nil && val.Kind == yaml.MappingNode {
+			extractComponents(val, sf)
 		}
 	}
 
 	extractTerraformStateTags(root, sf)
+	extractYAMLTags(root, sf, "")
 
 	return sf
 }
@@ -68,7 +79,7 @@ func nodeRange(n *yaml.Node) Range {
 	if n.Line == 0 || n.Column == 0 {
 		return Range{}
 	}
-	length := len(n.Value)
+	length := utf8.RuneCountInString(n.Value)
 	if n.Style == yaml.DoubleQuotedStyle || n.Style == yaml.SingleQuotedStyle {
 		length += 2
 	}
@@ -85,11 +96,30 @@ func extractImports(node *yaml.Node) []ImportNode {
 
 	if node.Kind == yaml.SequenceNode {
 		for _, item := range node.Content {
-			if item.Kind == yaml.ScalarNode {
+			switch item.Kind {
+			case yaml.ScalarNode:
 				imports = append(imports, ImportNode{
 					RawPath: item.Value,
 					Range:   nodeRange(item),
 				})
+			case yaml.MappingNode:
+				// Object-style import: {path: "...", context: {...}}
+				var rawPath, resolvedPath string
+				for i := 0; i < len(item.Content)-1; i += 2 {
+					k := item.Content[i]
+					v := item.Content[i+1]
+					if k.Value == "path" && v != nil && v.Kind == yaml.ScalarNode {
+						rawPath = v.Value
+						resolvedPath = v.Value
+					}
+				}
+				if rawPath != "" {
+					imports = append(imports, ImportNode{
+						RawPath: rawPath,
+						Path:    resolvedPath,
+						Range:   nodeRange(item),
+					})
+				}
 			}
 		}
 	}
@@ -116,7 +146,7 @@ func extractComponents(node *yaml.Node, sf *StackFile) {
 
 			compName := compKey.Value
 			if compName == "" || compName == "vars" || compName == "settings" ||
-				compName == "metadata" || compName == "env" {
+				compName == "metadata" || compName == "env" || compName == "backend" || compName == "providers" {
 				continue
 			}
 
@@ -139,6 +169,7 @@ func extractComponents(node *yaml.Node, sf *StackFile) {
 							extractVars(cvVal, sf, compName)
 						}
 					}
+					extractYAMLTags(compVal, sf, compName)
 				}
 			}
 		}
@@ -174,15 +205,27 @@ func extractMetadata(compNode *yaml.Node, sf *StackFile) {
 				if metaVal.Kind == yaml.ScalarNode {
 					meta.Inherits = metaVal.Value
 					meta.InheritsRange = nodeRange(metaVal)
-				} else if metaVal.Kind == yaml.SequenceNode && len(metaVal.Content) > 0 {
-					meta.Inherits = metaVal.Content[0].Value
-					meta.InheritsRange = nodeRange(metaVal.Content[0])
+				} else if metaVal.Kind == yaml.SequenceNode {
+					for _, item := range metaVal.Content {
+						if item.Kind == yaml.ScalarNode {
+							sf.Metadata = append(sf.Metadata, MetadataNode{
+								Inherits:      item.Value,
+								InheritsRange: nodeRange(item),
+								Range:         meta.Range,
+							})
+						}
+					}
 				}
 			case "type":
 				meta.Type = metaVal.Value
+			case "name":
+				meta.Name = metaVal.Value
+				meta.NameRange = nodeRange(metaVal)
 			}
 		}
-		sf.Metadata = append(sf.Metadata, meta)
+		if meta.Inherits != "" || meta.Component != "" || meta.Type != "" || meta.Name != "" {
+			sf.Metadata = append(sf.Metadata, meta)
+		}
 	}
 }
 
@@ -245,6 +288,51 @@ func extractTerraformStateTags(node *yaml.Node, sf *StackFile) {
 	}
 	for _, child := range node.Content {
 		extractTerraformStateTags(child, sf)
+	}
+}
+
+func extractYAMLTags(node *yaml.Node, sf *StackFile, componentName string) {
+	extractYAMLTagsWithKey(node, sf, componentName, "")
+}
+
+func extractYAMLTagsWithKey(node *yaml.Node, sf *StackFile, componentName, parentKey string) {
+	if node == nil {
+		return
+	}
+	// Only process scalar nodes with custom YAML tags.
+	if node.Kind == yaml.ScalarNode && node.Tag != "" && !strings.HasPrefix(node.Tag, "!!") {
+		sf.YAMLTags = append(sf.YAMLTags, YAMLTagNode{
+			Tag:       node.Tag,
+			Value:     node.Value,
+			Key:       parentKey,
+			Component: componentName,
+			Range:     nodeRange(node),
+		})
+	}
+	// For mapping nodes, track the tag on the node itself (if any) and recurse.
+	if node.Kind == yaml.MappingNode && node.Tag != "" && !strings.HasPrefix(node.Tag, "!!") {
+		sf.YAMLTags = append(sf.YAMLTags, YAMLTagNode{
+			Tag:       node.Tag,
+			Value:     "",
+			Key:       parentKey,
+			Component: componentName,
+			Range:     nodeRange(node),
+		})
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			keyNode := node.Content[i]
+			valNode := node.Content[i+1]
+			key := keyNode.Value
+			if parentKey != "" {
+				key = parentKey + "." + key
+			}
+			extractYAMLTagsWithKey(valNode, sf, componentName, key)
+		}
+	} else {
+		for _, child := range node.Content {
+			extractYAMLTagsWithKey(child, sf, componentName, parentKey)
+		}
 	}
 }
 
@@ -346,5 +434,80 @@ func extractVars(node *yaml.Node, sf *StackFile, componentName string) {
 			IsQuoted:  isQuoted,
 			Component: componentName,
 		})
+	}
+}
+
+func extractComponentTypeVars(node *yaml.Node, sf *StackFile, compType string) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		key := node.Content[i]
+		val := node.Content[i+1]
+		if key.Value != "vars" || val == nil || val.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j < len(val.Content)-1; j += 2 {
+			k := val.Content[j]
+			v := val.Content[j+1]
+			if k.Kind != yaml.ScalarNode {
+				continue
+			}
+			var valueStr string
+			if v != nil && v.Kind == yaml.ScalarNode {
+				valueStr = v.Value
+			}
+			isQuoted := false
+			if v != nil {
+				isQuoted = v.Style == yaml.DoubleQuotedStyle || v.Style == yaml.SingleQuotedStyle
+			}
+			vn := VarNode{
+				Key:       k.Value,
+				Value:     valueStr,
+				Range:     nodeRange(v),
+				IsQuoted:  isQuoted,
+				Component: "",
+			}
+			if compType == "terraform" {
+				sf.TerraformVars = append(sf.TerraformVars, vn)
+			} else if compType == "helmfile" {
+				sf.HelmfileVars = append(sf.HelmfileVars, vn)
+			}
+		}
+	}
+}
+
+func extractOverrides(node *yaml.Node, sf *StackFile) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		key := node.Content[i]
+		val := node.Content[i+1]
+		if key.Value != "vars" || val == nil || val.Kind != yaml.MappingNode {
+			continue
+		}
+		for j := 0; j < len(val.Content)-1; j += 2 {
+			k := val.Content[j]
+			v := val.Content[j+1]
+			if k.Kind != yaml.ScalarNode {
+				continue
+			}
+			var valueStr string
+			if v != nil && v.Kind == yaml.ScalarNode {
+				valueStr = v.Value
+			}
+			isQuoted := false
+			if v != nil {
+				isQuoted = v.Style == yaml.DoubleQuotedStyle || v.Style == yaml.SingleQuotedStyle
+			}
+			sf.OverridesVars = append(sf.OverridesVars, VarNode{
+				Key:       k.Value,
+				Value:     valueStr,
+				Range:     nodeRange(v),
+				IsQuoted:  isQuoted,
+				Component: "",
+			})
+		}
 	}
 }

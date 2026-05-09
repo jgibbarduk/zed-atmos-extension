@@ -698,7 +698,7 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 	var lineText string
 	h.documentContentMu.RLock()
 	if docContent, ok := h.documentContent[path]; ok {
-		lines := strings.Split(string(docContent), "\n")
+		lines := normalizeLines(string(docContent))
 		if int(req.Params.Position.Line) < len(lines) {
 			lineText = lines[req.Params.Position.Line]
 		}
@@ -706,7 +706,7 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 	h.documentContentMu.RUnlock()
 	if lineText == "" {
 		if contentBytes, err := os.ReadFile(path); err == nil {
-			lines := strings.Split(string(contentBytes), "\n")
+			lines := normalizeLines(string(contentBytes))
 			if int(req.Params.Position.Line) < len(lines) {
 				lineText = lines[req.Params.Position.Line]
 			}
@@ -726,6 +726,28 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 		if len(items) > 0 {
 			result := map[string]interface{}{
 				"isIncomplete": false,
+				"items":        items,
+			}
+			b, err := buildResponse(req.ID, result)
+			if err != nil {
+				return true, errorResponse(content, -32603, "Internal error"), nil, nil
+			}
+			return true, b, nil, nil
+		}
+	}
+
+	// Check if cursor is on a metadata.component line — offer component dirs.
+	if isMetadataComponentLine(lineText) {
+		partial := extractPartialPath(lineText, int(req.Params.Position.Character))
+		partialStartChar := int(req.Params.Position.Character) - len(partial)
+		replaceRange := lsp.Range{
+			Start: lsp.Position{Line: req.Params.Position.Line, Character: uint32(partialStartChar)},
+			End:   lsp.Position{Line: req.Params.Position.Line, Character: req.Params.Position.Character},
+		}
+		items := findComponentCompletions(basePath, partial, replaceRange)
+		if len(items) > 0 {
+			result := map[string]interface{}{
+				"isIncomplete": len(items) > 20,
 				"items":        items,
 			}
 			b, err := buildResponse(req.ID, result)
@@ -899,17 +921,68 @@ func findTemplateCompletions(idx *index.Index, path, partial string, replaceRang
 	return items
 }
 
+// isMetadataComponentLine checks if the current line is inside a metadata.component block.
+func isMetadataComponentLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "component:")
+}
+
+// findComponentCompletions suggests directories under components/.
+func findComponentCompletions(basePath, partial string, replaceRange lsp.Range) []map[string]interface{} {
+	componentsDir := filepath.Join(basePath, "components")
+	entries, err := os.ReadDir(componentsDir)
+	if err != nil {
+		return nil
+	}
+	var items []map[string]interface{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if partial != "" && !strings.HasPrefix(name, partial) {
+			continue
+		}
+		items = append(items, map[string]interface{}{
+			"label":  name,
+			"kind":   completionItemFolder,
+			"detail": "Component",
+			"textEdit": map[string]interface{}{
+				"range":   replaceRange,
+				"newText": name,
+			},
+		})
+	}
+	return items
+}
+
 // findPathCompletions walks the stacks directory and returns matching paths.
 func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map[string]interface{} {
 	var items []map[string]interface{}
 	// If the user typed "catalog/", look inside basePath/catalog/.
 	// If they typed "mixins/region/", look inside basePath/mixins/region/.
 	searchDir := filepath.Join(basePath, partial)
+	// Prevent directory traversal: ensure resolved path is within basePath.
+	cleanSearch, err := filepath.Abs(searchDir)
+	if err != nil {
+		return nil
+	}
+	cleanBase, err := filepath.Abs(basePath)
+	if err != nil {
+		return nil
+	}
+	if !strings.HasPrefix(cleanSearch, cleanBase) {
+		return nil
+	}
 	info, err := os.Stat(searchDir)
 	partialIsDir := err == nil && info.IsDir()
 	if !partialIsDir {
 		// Partial is not an existing directory; try its parent.
 		searchDir = filepath.Join(basePath, filepath.Dir(partial))
+		cleanSearch, _ = filepath.Abs(searchDir)
+		if !strings.HasPrefix(cleanSearch, cleanBase) {
+			return nil
+		}
 		info, err = os.Stat(searchDir)
 		if err != nil || !info.IsDir() {
 			return nil
@@ -1214,6 +1287,35 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 		}
 	}
 
+	// Hover on YAML function tags (!env, !exec, !include, !terraform.output, !store)
+	if hoverContent == nil && f != nil {
+		for _, tag := range f.YAMLTags {
+			if tag.Range.StartLine <= req.Params.Position.Line && tag.Range.EndLine >= req.Params.Position.Line {
+				doc := yamlTagDocs(tag.Tag)
+				if doc != "" {
+					hb := hoverBuilder{}
+					hb.header("YAML function: " + tag.Tag)
+					if tag.Key != "" {
+						hb.kv("Key", tag.Key)
+					}
+					if tag.Component != "" {
+						hb.kv("Component", tag.Component)
+					}
+					hb.paragraph(doc)
+					if tag.Value != "" {
+						hb.rule()
+						hb.codeBlock("yaml", tag.Value)
+					}
+					hoverContent = map[string]interface{}{
+						"kind":  "markdown",
+						"value": hb.build(),
+					}
+					break
+				}
+			}
+		}
+	}
+
 	// Show resolved variables view for terminal stacks
 	if hoverContent == nil && h.nameTemplate != "" && f != nil && len(f.Comps) > 0 {
 		vars := collectVars(f, h.idx)
@@ -1275,6 +1377,13 @@ func (h *LSPHandler) publishDiagnostics(uri string, diags []diagnostic) {
 		log.Printf("diagnostics: failed to marshal notification: %v", err)
 		return
 	}
+	// Guard against a race where Close() closes the channel between the
+	// closed check above and the send below.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("diagnostics: recovered from channel send panic: %v", r)
+		}
+	}()
 	select {
 	case h.notificationsCh <- notifBytes:
 	default:
@@ -1430,6 +1539,25 @@ func resolveStacksPath(rootPath string) string {
 	return filepath.Join(rootPath, basePath)
 }
 
+func yamlTagDocs(tag string) string {
+	switch tag {
+	case "!env":
+		return "Reads an environment variable. Usage: `!env ENV_VAR_NAME`"
+	case "!exec":
+		return "Executes a shell command and returns stdout. Usage: `!exec 'echo hello'`"
+	case "!include":
+		return "Includes the content of another file. Usage: `!include path/to/file.yaml`"
+	case "!terraform.output":
+		return "References a Terraform output from another component. Usage: `!terraform.output component_name output_name`"
+	case "!terraform.state":
+		return "References a Terraform remote state. Usage: `!terraform.state component_name [jq_expression]`"
+	case "!store":
+		return "Reads a value from a configured store (SSM, etc.). Usage: `!store key`"
+	default:
+		return ""
+	}
+}
+
 func parseAtmosConfig(rootPath string) (basePath, nameTemplate string) {
 	content, err := os.ReadFile(filepath.Join(rootPath, "atmos.yaml"))
 	if err != nil {
@@ -1472,6 +1600,16 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// normalizeLines splits text by "\n" and strips trailing "\r" from each line
+// so that CRLF files produce the same line content as LF files.
+func normalizeLines(text string) []string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
 }
 
 func importPaths(imports []index.ImportNode) []string {
@@ -1546,7 +1684,7 @@ func (h *LSPHandler) findTemplateExpressionAtPosition(sf *index.StackFile, idx *
 				return "", ""
 			}
 		}
-		lines := strings.Split(string(content), "\n")
+		lines := normalizeLines(string(content))
 		if int(line) >= len(lines) {
 			return "", ""
 		}

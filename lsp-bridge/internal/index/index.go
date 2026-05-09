@@ -20,6 +20,7 @@ type Range struct {
 
 type ImportNode struct {
 	RawPath  string   `json:"rawPath"`
+	Path     string   `json:"path,omitempty"`     // Resolved path for object-style imports
 	Range    Range    `json:"range"`
 	Resolves []string `json:"resolves"`
 }
@@ -35,6 +36,8 @@ type MetadataNode struct {
 	Inherits       string `json:"inherits,omitempty"`
 	InheritsRange  Range  `json:"inherits_range,omitempty"`
 	Type           string `json:"type,omitempty"`
+	Name           string `json:"name,omitempty"`
+	NameRange      Range  `json:"name_range,omitempty"`
 	Range          Range  `json:"range"`
 }
 
@@ -70,16 +73,28 @@ type SettingsDependsOnNode struct {
 	Range     Range  `json:"range"`
 }
 
+type YAMLTagNode struct {
+	Tag       string `json:"tag"`
+	Value     string `json:"value"`
+	Key       string `json:"key,omitempty"`
+	Component string `json:"component,omitempty"`
+	Range     Range  `json:"range"`
+}
+
 type StackFile struct {
 	Path           string                  `json:"path"`
 	Imports        []ImportNode            `json:"imports"`
 	Comps          []CompNode              `json:"comps"`
 	Metadata       []MetadataNode          `json:"metadata"`
 	Vars           []VarNode               `json:"vars"`
+	TerraformVars  []VarNode               `json:"terraform_vars,omitempty"`  // root-level terraform.vars
+	HelmfileVars   []VarNode               `json:"helmfile_vars,omitempty"`   // root-level helmfile.vars
+	OverridesVars  []VarNode               `json:"overrides_vars,omitempty"`  // overrides.vars
 	Deps           []DepNode               `json:"deps"`
 	TerraformState []TerraformStateRef     `json:"terraform_state"`
 	BackendTypes   []BackendTypeNode       `json:"backend_types"`
 	SettingsDeps   []SettingsDependsOnNode `json:"settings_deps"`
+	YAMLTags       []YAMLTagNode           `json:"yaml_tags,omitempty"`
 	ParseError     string                  `json:"-"` // YAML parse error, if any
 }
 
@@ -226,6 +241,7 @@ func deepCopyStackFile(sf *StackFile) *StackFile {
 		for i, imp := range sf.Imports {
 			out.Imports[i] = ImportNode{
 				RawPath:  imp.RawPath,
+				Path:     imp.Path,
 				Range:    imp.Range,
 				Resolves: append([]string(nil), imp.Resolves...),
 			}
@@ -258,6 +274,22 @@ func deepCopyStackFile(sf *StackFile) *StackFile {
 	if len(sf.SettingsDeps) > 0 {
 		out.SettingsDeps = make([]SettingsDependsOnNode, len(sf.SettingsDeps))
 		copy(out.SettingsDeps, sf.SettingsDeps)
+	}
+	if len(sf.TerraformVars) > 0 {
+		out.TerraformVars = make([]VarNode, len(sf.TerraformVars))
+		copy(out.TerraformVars, sf.TerraformVars)
+	}
+	if len(sf.HelmfileVars) > 0 {
+		out.HelmfileVars = make([]VarNode, len(sf.HelmfileVars))
+		copy(out.HelmfileVars, sf.HelmfileVars)
+	}
+	if len(sf.OverridesVars) > 0 {
+		out.OverridesVars = make([]VarNode, len(sf.OverridesVars))
+		copy(out.OverridesVars, sf.OverridesVars)
+	}
+	if len(sf.YAMLTags) > 0 {
+		out.YAMLTags = make([]YAMLTagNode, len(sf.YAMLTags))
+		copy(out.YAMLTags, sf.YAMLTags)
 	}
 	return out
 }
