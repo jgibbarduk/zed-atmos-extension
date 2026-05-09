@@ -4,3 +4,8 @@
 /lsp-bridge/atmos-lsp-bridge
 /lsp-bridge/atmos-lsp-bridge-test
 /.worktrees/
+/.claude/
+.DS_Store
+/findings.md
+/progress.md
+/task_plan.md

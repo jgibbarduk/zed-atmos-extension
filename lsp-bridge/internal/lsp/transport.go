@@ -56,7 +56,9 @@ func IsNotification(content []byte) bool {
 	var msg struct {
 		ID json.RawMessage `json:"id"`
 	}
-	json.Unmarshal(content, &msg)
+	if err := json.Unmarshal(content, &msg); err != nil {
+		return false
+	}
 	return msg.ID == nil
 }
 

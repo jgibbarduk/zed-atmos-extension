@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -14,14 +13,16 @@ import (
 
 type Handler interface {
 	HandleMethod(method string, content []byte) (handled bool, response []byte, notifications [][]byte, err error)
+	Notifications() <-chan []byte
+	Close()
 }
 
 type Proxy struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
 	stdoutBuf *bufio.Reader
-	mu       sync.Mutex
+	mu        sync.Mutex
 }
 
 func New(atmosPath string) (*Proxy, error) {
@@ -55,40 +56,37 @@ func NewNop() *Proxy {
 	return &Proxy{}
 }
 
-func (p *Proxy) CallDownstream(content []byte) ([]byte, error) {
+func (p *Proxy) CallDownstream(content []byte) ([]byte, [][]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.stdin == nil {
-		return nil, fmt.Errorf("downstream LSP not available")
+		return nil, nil, fmt.Errorf("downstream LSP not available")
 	}
 
 	if err := lsp.WriteMessage(p.stdin, content); err != nil {
-		return nil, fmt.Errorf("write to atmos: %w", err)
+		return nil, nil, fmt.Errorf("write to atmos: %w", err)
 	}
 
 	if lsp.IsNotification(content) {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// The downstream atmos LSP may have sent unsolicited notifications
 	// (e.g. publishDiagnostics) or server-to-client requests since the last
 	// CallDownstream. We must drain them so we don't misalign request/response
-	// pairs.
+	// pairs, but we also need to preserve them to forward to the client.
+	var notifications [][]byte
 	for {
 		msg, err := lsp.ReadMessage(p.stdoutBuf)
 		if err != nil {
-			return nil, fmt.Errorf("read from atmos: %w", err)
+			return nil, notifications, fmt.Errorf("read from atmos: %w", err)
 		}
-		if lsp.IsNotification(msg.Content) {
-			log.Printf("dropped unsolicited atmos notification: %s", string(msg.Content))
+		if lsp.IsNotification(msg.Content) || lsp.IsRequest(msg.Content) {
+			notifications = append(notifications, msg.Content)
 			continue
 		}
-		if lsp.IsRequest(msg.Content) {
-			log.Printf("dropped server-to-client request from atmos: %s", string(msg.Content))
-			continue
-		}
-		return msg.Content, nil
+		return msg.Content, notifications, nil
 	}
 }
 
@@ -101,39 +99,42 @@ func (p *Proxy) SendNotification(content []byte) error {
 	return lsp.WriteMessage(p.stdin, content)
 }
 
-func buildErrorResponse(content []byte, code int, message string) []byte {
-	var req struct {
-		ID json.RawMessage `json:"id"`
-	}
-	json.Unmarshal(content, &req)
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"error": map[string]interface{}{
-			"code":    code,
-			"message": message,
-		},
-	}
-	b, _ := json.Marshal(resp)
-	return b
-}
-
 func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
 	reader := bufio.NewReader(stdin)
+
+	// Forward async notifications from the handler to the client.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("proxy: panic in notification forwarder: %v", r)
+			}
+		}()
+		for notif := range handler.Notifications() {
+			log.Printf("proxy: forwarding async notification (%d bytes)", len(notif))
+			if err := lsp.WriteMessage(stdout, notif); err != nil {
+				log.Printf("write async notification: %v", err)
+			}
+		}
+	}()
 
 	for {
 		msg, err := lsp.ReadMessage(reader)
 		if err != nil {
 			if err == io.EOF {
 				log.Printf("proxy: stdin EOF, shutting down")
+				handler.Close()
 				return nil
 			}
+			handler.Close()
 			return fmt.Errorf("read stdin: %w", err)
 		}
 
 		method := lsp.ParseMethod(msg.Content)
 		isNotif := lsp.IsNotification(msg.Content)
 		log.Printf("proxy: recv %s (notification=%v, %d bytes)", method, isNotif, len(msg.Content))
+		if !isNotif {
+			log.Printf("proxy: recv content: %s", string(msg.Content))
+		}
 
 		handled, handledResp, notifications, err := handler.HandleMethod(method, msg.Content)
 		if err != nil {
@@ -150,10 +151,17 @@ func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
 				}
 			}
 		} else {
-			response, err = p.CallDownstream(msg.Content)
+			var downstreamNotifs [][]byte
+			response, downstreamNotifs, err = p.CallDownstream(msg.Content)
 			if err != nil {
 				log.Printf("forward error: %v", err)
-				response = buildErrorResponse(msg.Content, -32603, fmt.Sprintf("Downstream LSP error: %v", err))
+				response = lsp.BuildErrorResponse(msg.Content, -32603, fmt.Sprintf("Downstream LSP error: %v", err))
+			}
+			for i, notif := range downstreamNotifs {
+				log.Printf("proxy: forwarding downstream notification %d (%d bytes)", i, len(notif))
+				if werr := lsp.WriteMessage(stdout, notif); werr != nil {
+					log.Printf("write downstream notification: %v", werr)
+				}
 			}
 		}
 

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
@@ -17,8 +18,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-type DownstreamCaller interface {
-	CallDownstream(content []byte) ([]byte, error)
+const (
+	completionItemVariable = lsp.CompletionItemKindVariable
+	completionItemFile     = lsp.CompletionItemKindFile
+	completionItemFolder   = lsp.CompletionItemKindFolder
+)
+
+type downstreamCaller interface {
+	CallDownstream(content []byte) (response []byte, notifications [][]byte, err error)
 	SendNotification(content []byte) error
 }
 
@@ -40,18 +47,47 @@ type textDocumentParams struct {
 
 type LSPHandler struct {
 	idx                 *index.Index
-	downstream          DownstreamCaller
-	initialized         bool
+	downstream          downstreamCaller
+	initialized         atomic.Bool
 	diagnosticsDisabled bool
 	projectRoot         string
 	nameTemplate        string
+	documentContent     map[string][]byte
+	documentContentMu   sync.RWMutex
+
+	// Async diagnostics
+	notificationsCh  chan []byte
+	diagTimer        *time.Timer
+	diagMu           sync.Mutex
+	diagPendingURI   string
+	diagPendingPath  string
+	closed           atomic.Bool
 }
 
-func New(idx *index.Index, downstream DownstreamCaller) *LSPHandler {
+func New(idx *index.Index, downstream downstreamCaller) *LSPHandler {
 	return &LSPHandler{
-		idx:        idx,
-		downstream: downstream,
+		idx:             idx,
+		downstream:      downstream,
+		documentContent: make(map[string][]byte),
+		notificationsCh: make(chan []byte, 16),
 	}
+}
+
+// Notifications returns the channel for async notifications from the handler.
+func (h *LSPHandler) Notifications() <-chan []byte {
+	return h.notificationsCh
+}
+
+// Close shuts down the handler, stopping any pending timers and closing the
+// notification channel so the proxy goroutine can exit cleanly.
+func (h *LSPHandler) Close() {
+	h.closed.Store(true)
+	h.diagMu.Lock()
+	if h.diagTimer != nil {
+		h.diagTimer.Stop()
+	}
+	h.diagMu.Unlock()
+	close(h.notificationsCh)
 }
 
 func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, [][]byte, error) {
@@ -67,8 +103,8 @@ func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, 
 	case "initialized":
 		return h.handleInitialized(content)
 	case "shutdown":
-		h.initialized = false
-		downstreamResp, err := h.downstream.CallDownstream(content)
+		h.initialized.Store(false)
+		downstreamResp, _, err := h.downstream.CallDownstream(content)
 		if err != nil {
 			log.Printf("shutdown: forward to atmos failed: %v", err)
 		}
@@ -97,7 +133,7 @@ func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, 
 		return h.handleCodeAction(content)
 	case "textDocument/completion":
 		return h.handleCompletion(content)
-	case "textDocument/didOpen", "textDocument/didChange", "textDocument/didSave":
+	case "textDocument/didOpen", "textDocument/didChange", "textDocument/didSave", "textDocument/didClose":
 		return h.handleDiagnostics(content)
 	}
 	return false, nil, nil, nil
@@ -128,17 +164,37 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 		rootPath = strings.TrimPrefix(params.RootURI, "file://")
 	}
 
-	// Parse initialization_options for user configuration.
+	// Parse initialization_options and merge with defaults.
+	cfg := defaultConfig()
 	var initOpts struct {
-		InitializationOptions Config `json:"initializationOptions"`
+		InitializationOptions config `json:"initializationOptions"`
 	}
-	json.Unmarshal(req.Params, &initOpts)
+	if err := json.Unmarshal(req.Params, &initOpts); err != nil {
+		log.Printf("initialize: unmarshal init options: %v", err)
+	}
+
+	if initOpts.InitializationOptions.StacksPath != "" {
+		cfg.StacksPath = initOpts.InitializationOptions.StacksPath
+	}
+	if initOpts.InitializationOptions.DiagnosticsEnabled != nil {
+		cfg.DiagnosticsEnabled = initOpts.InitializationOptions.DiagnosticsEnabled
+	}
+	if initOpts.InitializationOptions.AtmosCLIPath != "" {
+		cfg.AtmosCLIPath = initOpts.InitializationOptions.AtmosCLIPath
+	}
+	if initOpts.InitializationOptions.LogLevel != "" {
+		cfg.LogLevel = initOpts.InitializationOptions.LogLevel
+	}
 
 	if rootPath != "" {
 		h.projectRoot = rootPath
 		basePath, nameTemplate := parseAtmosConfig(rootPath)
-		if initOpts.InitializationOptions.StacksPath != "" {
-			h.idx.SetBasePath(initOpts.InitializationOptions.StacksPath)
+		if cfg.StacksPath != "" {
+			if filepath.IsAbs(cfg.StacksPath) {
+				h.idx.SetBasePath(cfg.StacksPath)
+			} else {
+				h.idx.SetBasePath(filepath.Join(rootPath, cfg.StacksPath))
+			}
 		} else if basePath != "" {
 			h.idx.SetBasePath(filepath.Join(rootPath, basePath))
 		} else {
@@ -147,11 +203,11 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 		h.nameTemplate = nameTemplate
 	}
 
-	if initOpts.InitializationOptions.DiagnosticsEnabled != nil && !*initOpts.InitializationOptions.DiagnosticsEnabled {
+	if cfg.DiagnosticsEnabled != nil && !*cfg.DiagnosticsEnabled {
 		h.diagnosticsDisabled = true
 	}
 
-	downstreamResp, err := h.downstream.CallDownstream(content)
+	downstreamResp, _, err := h.downstream.CallDownstream(content)
 	if err != nil {
 		log.Printf("initialize: downstream atmos lsp failed: %v — returning bridge-only capabilities", err)
 	}
@@ -164,12 +220,12 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 		"codeActionProvider": true,
 		"completionProvider": map[string]interface{}{
 			"resolveProvider":   false,
-			"triggerCharacters": []string{".", ":", "/"},
+			"triggerCharacters": []string{".", ":", "/", "{"},
 		},
 		"textDocumentSync": map[string]interface{}{
 			"openClose": true,
-			"change":    1,
-			"save":      true,
+			"change":    1, // Full document sync — our didChange handler replaces the whole doc
+			"save":      map[string]interface{}{"includeText": false},
 		},
 	}
 
@@ -211,13 +267,23 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 }
 
 func (h *LSPHandler) handleInitialized(content []byte) (bool, []byte, [][]byte, error) {
-	go h.idx.Reindex()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("reindex panic: %v", r)
+			}
+		}()
+		h.idx.Reindex()
+		// Publish diagnostics for every file in the workspace so issues
+		// appear without requiring each file to be opened individually.
+		h.publishWorkspaceDiagnostics()
+	}()
 	if err := h.idx.StartWatching(func() {
 		h.idx.Reindex()
 	}); err != nil {
 		log.Printf("file watcher start failed: %v", err)
 	}
-	h.initialized = true
+	h.initialized.Store(true)
 	if err := h.downstream.SendNotification(content); err != nil {
 		log.Printf("initialized: forward to atmos failed: %v", err)
 	}
@@ -327,13 +393,10 @@ func (h *LSPHandler) handleDefinition(content []byte) (bool, []byte, [][]byte, e
 		locations = []map[string]interface{}{}
 	}
 
-	resultBytes, _ := json.Marshal(locations)
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"result":  json.RawMessage(resultBytes),
+	b, err := buildResponse(req.ID, locations)
+	if err != nil {
+		return true, errorResponse(content, -32603, "Internal error"), nil, nil
 	}
-	b, _ := json.Marshal(resp)
 	return true, b, nil, nil
 }
 
@@ -380,17 +443,15 @@ func (h *LSPHandler) handleReferences(content []byte) (bool, []byte, [][]byte, e
 		if comp.Range.StartLine <= req.Params.Position.Line && comp.Range.EndLine >= req.Params.Position.Line {
 			refs := h.idx.FindComponent(comp.Name)
 			for _, sf := range refs {
-				if sf.Path != path {
-					for _, c := range sf.Comps {
-						if c.Name == comp.Name {
-							locations = append(locations, map[string]interface{}{
-								"uri": "file://" + sf.Path,
-								"range": map[string]interface{}{
-									"start": map[string]uint32{"line": c.Range.StartLine, "character": c.Range.StartChar},
-									"end":   map[string]uint32{"line": c.Range.EndLine, "character": c.Range.EndChar},
-								},
-							})
-						}
+				for _, c := range sf.Comps {
+					if c.Name == comp.Name {
+						locations = append(locations, map[string]interface{}{
+							"uri": "file://" + sf.Path,
+							"range": map[string]interface{}{
+								"start": map[string]uint32{"line": c.Range.StartLine, "character": c.Range.StartChar},
+								"end":   map[string]uint32{"line": c.Range.EndLine, "character": c.Range.EndChar},
+							},
+						})
 					}
 				}
 			}
@@ -401,13 +462,10 @@ func (h *LSPHandler) handleReferences(content []byte) (bool, []byte, [][]byte, e
 		locations = []map[string]interface{}{}
 	}
 
-	resultBytes, _ := json.Marshal(locations)
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"result":  json.RawMessage(resultBytes),
+	b, err := buildResponse(req.ID, locations)
+	if err != nil {
+		return true, errorResponse(content, -32603, "Internal error"), nil, nil
 	}
-	b, _ := json.Marshal(resp)
 	return true, b, nil, nil
 }
 
@@ -514,9 +572,13 @@ func (h *LSPHandler) handleRename(content []byte) (bool, []byte, [][]byte, error
 
 		for _, ts := range sf.TerraformState {
 			if ts.Component == targetComp {
+				newText := req.Params.NewName
+				if ts.JQExpr != "" {
+					newText += " " + ts.JQExpr
+				}
 				edits = append(edits, lsp.TextEdit{
 					Range:   toLSPRange(ts.Range),
-					NewText: req.Params.NewName,
+					NewText: newText,
 				})
 			}
 		}
@@ -536,13 +598,10 @@ func (h *LSPHandler) handleRename(content []byte) (bool, []byte, [][]byte, error
 	}
 
 	result := lsp.WorkspaceEdit{Changes: editMap}
-	resultBytes, _ := json.Marshal(result)
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"result":  json.RawMessage(resultBytes),
+	b, err := buildResponse(req.ID, result)
+	if err != nil {
+		return true, errorResponse(content, -32603, "Internal error"), nil, nil
 	}
-	b, _ := json.Marshal(resp)
 	return true, b, nil, nil
 }
 
@@ -612,13 +671,10 @@ func (h *LSPHandler) handleCodeAction(content []byte) (bool, []byte, [][]byte, e
 		}
 	}
 
-	resultBytes, _ := json.Marshal(actions)
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"result":  json.RawMessage(resultBytes),
+	b, err := buildResponse(req.ID, actions)
+	if err != nil {
+		return true, errorResponse(content, -32603, "Internal error"), nil, nil
 	}
-	b, _ := json.Marshal(resp)
 	return true, b, nil, nil
 }
 
@@ -640,14 +696,14 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 
 	// Read the current line to detect what the user is typing.
 	var lineText string
-	documentContentMu.RLock()
-	if docContent, ok := documentContent[path]; ok {
+	h.documentContentMu.RLock()
+	if docContent, ok := h.documentContent[path]; ok {
 		lines := strings.Split(string(docContent), "\n")
 		if int(req.Params.Position.Line) < len(lines) {
 			lineText = lines[req.Params.Position.Line]
 		}
 	}
-	documentContentMu.RUnlock()
+	h.documentContentMu.RUnlock()
 	if lineText == "" {
 		if contentBytes, err := os.ReadFile(path); err == nil {
 			lines := strings.Split(string(contentBytes), "\n")
@@ -658,6 +714,26 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 	}
 	if lineText == "" {
 		return true, emptyResult(content, req.ID), nil, nil
+	}
+
+	// Check if the cursor is inside a Go template expression {{ ... }}.
+	if partial, startChar := extractTemplatePartial(lineText, int(req.Params.Position.Character)); partial != "" {
+		replaceRange := lsp.Range{
+			Start: lsp.Position{Line: req.Params.Position.Line, Character: uint32(startChar)},
+			End:   lsp.Position{Line: req.Params.Position.Line, Character: req.Params.Position.Character},
+		}
+		items := findTemplateCompletions(h.idx, path, partial, replaceRange)
+		if len(items) > 0 {
+			result := map[string]interface{}{
+				"isIncomplete": false,
+				"items":        items,
+			}
+			b, err := buildResponse(req.ID, result)
+			if err != nil {
+				return true, errorResponse(content, -32603, "Internal error"), nil, nil
+			}
+			return true, b, nil, nil
+		}
 	}
 
 	// Extract the partial path the user is typing.
@@ -684,13 +760,10 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 		"isIncomplete": len(items) > 20,
 		"items":        items,
 	}
-	resultBytes, _ := json.Marshal(result)
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"result":  json.RawMessage(resultBytes),
+	b, err := buildResponse(req.ID, result)
+	if err != nil {
+		return true, errorResponse(content, -32603, "Internal error"), nil, nil
 	}
-	b, _ := json.Marshal(resp)
 	return true, b, nil, nil
 }
 
@@ -705,7 +778,7 @@ func extractPartialPath(line string, cursor int) string {
 	start := cursor
 	for start > 0 {
 		c := line[start-1]
-		if c == ' ' || c == '\t' || c == '-' || c == ':' || c == '"' || c == '\'' {
+		if c == ' ' || c == '\t' || c == ':' || c == '"' || c == '\'' {
 			break
 		}
 		start--
@@ -720,6 +793,112 @@ func extractPartialPath(line string, cursor int) string {
 	return line[start:cursor]
 }
 
+// extractTemplatePartial detects if the cursor is inside a Go template expression
+// (e.g. "{{ .vars.na| }}" where | is the cursor) and returns the partial text
+// after the leading dot, plus the character position where that partial starts.
+func extractTemplatePartial(line string, cursor int) (string, int) {
+	if cursor > len(line) {
+		cursor = len(line)
+	}
+	// Find the nearest "{{" before the cursor.
+	openIdx := strings.LastIndex(line[:cursor], "{{")
+	if openIdx == -1 {
+		return "", 0
+	}
+	// If there's a closing "}}" between the opening braces and the cursor,
+	// the cursor is after a completed template expression, not inside one.
+	if strings.Contains(line[openIdx+2:cursor], "}}") {
+		return "", 0
+	}
+	// Walk forward from {{ to find the dot that starts the template variable.
+	// Skip spaces between {{ and the dot.
+	i := openIdx + 2
+	for i < cursor && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	if i >= cursor || line[i] != '.' {
+		// No dot found before cursor — not inside a template variable.
+		return "", 0
+	}
+	// The partial starts right after the dot.
+	partialStart := i + 1
+	if partialStart > cursor {
+		return "", 0
+	}
+	return line[partialStart:cursor], partialStart
+}
+
+// findTemplateCompletions suggests available template variables.
+func findTemplateCompletions(idx *index.Index, path, partial string, replaceRange lsp.Range) []map[string]interface{} {
+	var items []map[string]interface{}
+	f := idx.GetFile(path)
+	if f == nil {
+		return items
+	}
+	vars := collectVars(f, idx)
+
+	// Determine what the user is typing.
+	// Patterns: "vars.na" -> suggest vars, "atmos_" -> suggest builtins, "" -> suggest everything.
+	// partial can be "vars." (no key yet) so use HasPrefix, not equality check.
+	switch {
+	case partial == "vars." || strings.HasPrefix(partial, "vars."):
+		keyPrefix := strings.TrimPrefix(partial, "vars.")
+		for k, v := range vars {
+			if strings.HasPrefix(k, keyPrefix) {
+				label := "vars." + k
+				detail := v
+				if len(detail) > 40 {
+					detail = detail[:37] + "..."
+				}
+				items = append(items, map[string]interface{}{
+					"label":  label,
+					"kind":   completionItemVariable,
+					"detail": detail,
+					"textEdit": map[string]interface{}{
+						"range":   replaceRange,
+						"newText": label,
+					},
+				})
+			}
+		}
+	default:
+		// Suggest built-ins and vars keys.
+		builtins := []string{"atmos_component", "atmos_stack", "atmos_stack_file", "workspace", "component"}
+		for _, b := range builtins {
+			if strings.HasPrefix(b, partial) {
+				items = append(items, map[string]interface{}{
+					"label":  b,
+					"kind":   completionItemVariable,
+					"detail": "Built-in template variable",
+					"textEdit": map[string]interface{}{
+						"range":   replaceRange,
+						"newText": b,
+					},
+				})
+			}
+		}
+		for k, v := range vars {
+			if strings.HasPrefix(k, partial) {
+				label := "vars." + k
+				detail := v
+				if len(detail) > 40 {
+					detail = detail[:37] + "..."
+				}
+				items = append(items, map[string]interface{}{
+					"label":  label,
+					"kind":   completionItemVariable,
+					"detail": detail,
+					"textEdit": map[string]interface{}{
+						"range":   replaceRange,
+						"newText": label,
+					},
+				})
+			}
+		}
+	}
+	return items
+}
+
 // findPathCompletions walks the stacks directory and returns matching paths.
 func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map[string]interface{} {
 	var items []map[string]interface{}
@@ -727,7 +906,8 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 	// If they typed "mixins/region/", look inside basePath/mixins/region/.
 	searchDir := filepath.Join(basePath, partial)
 	info, err := os.Stat(searchDir)
-	if err != nil || !info.IsDir() {
+	partialIsDir := err == nil && info.IsDir()
+	if !partialIsDir {
 		// Partial is not an existing directory; try its parent.
 		searchDir = filepath.Join(basePath, filepath.Dir(partial))
 		info, err = os.Stat(searchDir)
@@ -742,7 +922,7 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 	}
 
 	prefix := ""
-	if partial != "" && !strings.HasSuffix(partial, "/") && !strings.HasSuffix(partial, string(filepath.Separator)) {
+	if partial != "" && !partialIsDir && !strings.HasSuffix(partial, "/") && !strings.HasSuffix(partial, string(filepath.Separator)) {
 		prefix = filepath.Base(partial)
 	}
 
@@ -771,7 +951,7 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 		if entry.IsDir() {
 			items = append(items, map[string]interface{}{
 				"label":  label + "/",
-				"kind":   19, // Folder
+				"kind":   completionItemFolder,
 				"detail": "Directory",
 				"textEdit": map[string]interface{}{
 					"range":   replaceRange,
@@ -781,7 +961,7 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 		} else if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
 			items = append(items, map[string]interface{}{
 				"label":  label,
-				"kind":   17, // File
+				"kind":   completionItemFile,
 				"detail": "Stack file",
 				"textEdit": map[string]interface{}{
 					"range":   replaceRange,
@@ -869,7 +1049,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 						if err != nil {
 							rel = r
 						}
-						hb.bullet(fmt.Sprintf("`%s`", rel))
+						hb.bullet(rel)
 					}
 				} else {
 					hb.note("Unable to resolve path")
@@ -914,7 +1094,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 								if err != nil {
 									rel = sf.Path
 								}
-								hb.bullet(fmt.Sprintf("`%s`", rel))
+								hb.bullet(rel)
 							}
 						}
 					}
@@ -957,7 +1137,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			for _, v := range f.Vars {
 				if v.Range.StartLine <= req.Params.Position.Line && v.Range.EndLine >= req.Params.Position.Line {
 					if strings.Contains(v.Value, "{{") && strings.Contains(v.Value, "}}") {
-						expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character, h.nameTemplate)
+						expr, resolved := h.findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character, h.nameTemplate)
 						if expr != "" {
 							hb := hoverBuilder{}
 							hb.header("Template expression")
@@ -978,7 +1158,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 			}
 			// Fallback: template expressions outside of vars: blocks
 			if hoverContent == nil {
-				expr, resolved := findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character, h.nameTemplate)
+				expr, resolved := h.findTemplateExpressionAtPosition(f, h.idx, req.Params.Position.Line, req.Params.Position.Character, h.nameTemplate)
 				if expr != "" {
 					hb := hoverBuilder{}
 					hb.header("Template expression")
@@ -1020,7 +1200,7 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 							if err != nil {
 								rel = ref.Path
 							}
-							hb.bullet(fmt.Sprintf("`%s`", rel))
+							hb.bullet(rel)
 						}
 					}
 
@@ -1066,14 +1246,56 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 		"contents": hoverContent,
 	}
 
-	resultBytes, _ := json.Marshal(result)
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"result":  json.RawMessage(resultBytes),
+	b, err := buildResponse(req.ID, result)
+	if err != nil {
+		return true, errorResponse(content, -32603, "Internal error"), nil, nil
 	}
-	b, _ := json.Marshal(resp)
 	return true, b, nil, nil
+}
+
+func (h *LSPHandler) publishDiagnostics(uri string, diags []diagnostic) {
+	if h.closed.Load() {
+		return
+	}
+	// Ensure we always send [] rather than null so the client clears stale
+	// diagnostics instead of ignoring the notification.
+	if diags == nil {
+		diags = []diagnostic{}
+	}
+	notification := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/publishDiagnostics",
+		"params": map[string]interface{}{
+			"uri":         uri,
+			"diagnostics": diags,
+		},
+	}
+	notifBytes, err := json.Marshal(notification)
+	if err != nil {
+		log.Printf("diagnostics: failed to marshal notification: %v", err)
+		return
+	}
+	select {
+	case h.notificationsCh <- notifBytes:
+	default:
+		log.Printf("diagnostics: notification channel full, dropping")
+	}
+}
+
+func (h *LSPHandler) publishWorkspaceDiagnostics() {
+	files := h.idx.AllFiles()
+	log.Printf("diagnostics: publishing workspace diagnostics for %d files", len(files))
+	for _, sf := range files {
+		if sf == nil {
+			continue
+		}
+		uri := "file://" + sf.Path
+		diags := runBestPracticeChecks(sf, filepath.Dir(sf.Path), h.idx)
+		if len(diags) > 0 {
+			log.Printf("diagnostics: %s has %d issues", sf.Path, len(diags))
+		}
+		h.publishDiagnostics(uri, diags)
+	}
 }
 
 func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, error) {
@@ -1092,7 +1314,8 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 		return true, nil, nil, nil
 	}
 
-	path := strings.TrimPrefix(req.Params.TextDocument.URI, "file://")
+	uri := req.Params.TextDocument.URI
+	path := strings.TrimPrefix(uri, "file://")
 	log.Printf("diagnostics: %s for %s", req.Method, path)
 
 	// Parse live document content for didOpen / didChange so diagnostics
@@ -1107,9 +1330,9 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 		}
 		if err := json.Unmarshal(content, &openReq); err == nil && openReq.Params.TextDocument.Text != "" {
 			text := openReq.Params.TextDocument.Text
-			documentContentMu.Lock()
-			documentContent[path] = []byte(text)
-			documentContentMu.Unlock()
+			h.documentContentMu.Lock()
+			h.documentContent[path] = []byte(text)
+			h.documentContentMu.Unlock()
 			sf := index.ParseYAMLContent(path, []byte(text))
 			h.idx.UpsertFile(path, sf)
 		}
@@ -1121,19 +1344,41 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 				} `json:"contentChanges"`
 			} `json:"params"`
 		}
-		if err := json.Unmarshal(content, &changeReq); err == nil && len(changeReq.Params.ContentChanges) > 0 {
+		if err := json.Unmarshal(content, &changeReq); err != nil {
+			log.Printf("diagnostics: didChange unmarshal error: %v", err)
+		} else if len(changeReq.Params.ContentChanges) == 0 {
+			log.Printf("diagnostics: didChange received with zero contentChanges")
+		} else {
 			text := changeReq.Params.ContentChanges[0].Text
-			documentContentMu.Lock()
-			documentContent[path] = []byte(text)
-			documentContentMu.Unlock()
+			log.Printf("diagnostics: didChange text length=%d firstLine=%q", len(text), firstLine(text))
+			h.documentContentMu.Lock()
+			h.documentContent[path] = []byte(text)
+			h.documentContentMu.Unlock()
 			sf := index.ParseYAMLContent(path, []byte(text))
+			if sf != nil {
+				log.Printf("diagnostics: didChange parsed %d imports: %v", len(sf.Imports), importPaths(sf.Imports))
+			} else {
+				log.Printf("diagnostics: didChange ParseYAMLContent returned nil")
+			}
 			h.idx.UpsertFile(path, sf)
 		}
 	} else if req.Method == "textDocument/didSave" {
-		documentContentMu.Lock()
-		delete(documentContent, path)
-		documentContentMu.Unlock()
+		h.documentContentMu.Lock()
+		delete(h.documentContent, path)
+		h.documentContentMu.Unlock()
 		h.idx.ReindexFile(path)
+	} else if req.Method == "textDocument/didClose" {
+		h.documentContentMu.Lock()
+		delete(h.documentContent, path)
+		h.documentContentMu.Unlock()
+		// Forward to downstream before clearing diagnostics so atmos LSP
+		// knows the file was closed.
+		if err := h.downstream.SendNotification(content); err != nil {
+			log.Printf("diagnostics: forward didClose to atmos failed: %v", err)
+		}
+		// Clear diagnostics for closed file.
+		h.publishDiagnostics(uri, []diagnostic{})
+		return true, nil, nil, nil
 	}
 
 	// Forward notification to downstream atmos LSP for its own validation.
@@ -1141,40 +1386,39 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 		log.Printf("diagnostics: forward to atmos failed: %v", err)
 	}
 
-	f := h.idx.GetFile(path)
-	if f == nil {
-		log.Printf("diagnostics: no parsed file for %s, publishing empty set", path)
-		// Nothing we can validate yet, but we must still clear any stale
-		// diagnostics by publishing an empty set.
-		notification := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"method":  "textDocument/publishDiagnostics",
-			"params": map[string]interface{}{
-				"uri":         req.Params.TextDocument.URI,
-				"diagnostics": []Diagnostic{},
-			},
+	// Debounce diagnostic computation so rapid edits don't block the LSP loop.
+	h.diagMu.Lock()
+	h.diagPendingURI = uri
+	h.diagPendingPath = path
+	if h.diagTimer != nil {
+		h.diagTimer.Stop()
+	}
+	h.diagTimer = time.AfterFunc(300*time.Millisecond, func() {
+		h.diagMu.Lock()
+		uri := h.diagPendingURI
+		path := h.diagPendingPath
+		h.diagPendingURI = ""
+		h.diagPendingPath = ""
+		h.diagTimer = nil
+		h.diagMu.Unlock()
+
+		f := h.idx.GetFileUnsafe(path)
+		if f == nil {
+			log.Printf("diagnostics: no parsed file for %s, publishing empty set", path)
+			h.publishDiagnostics(uri, []diagnostic{})
+			return
 		}
-		notifBytes, _ := json.Marshal(notification)
-		return true, nil, [][]byte{notifBytes}, nil
-	}
 
-	diags := runBestPracticeChecks(f, filepath.Dir(path), h.idx)
-	log.Printf("diagnostics: found %d issues for %s", len(diags), path)
-	for i, d := range diags {
-		log.Printf("diagnostics: [%d] %s (line %d)", i, d.Message, d.Range.Start.Line)
-	}
+		diags := runBestPracticeChecks(f, filepath.Dir(path), h.idx)
+		log.Printf("diagnostics: found %d issues for %s (imports=%v)", len(diags), path, importPaths(f.Imports))
+		for i, d := range diags {
+			log.Printf("diagnostics: [%d] %s (line %d)", i, d.Message, d.Range.Start.Line)
+		}
+		h.publishDiagnostics(uri, diags)
+	})
+	h.diagMu.Unlock()
 
-	notification := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  "textDocument/publishDiagnostics",
-		"params": map[string]interface{}{
-			"uri":         req.Params.TextDocument.URI,
-			"diagnostics": diags,
-		},
-	}
-	notifBytes, _ := json.Marshal(notification)
-	log.Printf("diagnostics: publishing %d bytes", len(notifBytes))
-	return true, nil, [][]byte{notifBytes}, nil
+	return true, nil, nil, nil
 }
 
 func resolveStacksPath(rootPath string) string {
@@ -1223,13 +1467,25 @@ func parseAtmosConfig(rootPath string) (basePath, nameTemplate string) {
 	return basePath, nameTemplate
 }
 
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+func importPaths(imports []index.ImportNode) []string {
+	out := make([]string, len(imports))
+	for i, imp := range imports {
+		out[i] = imp.RawPath
+	}
+	return out
+}
+
 var (
 	nameTemplateVarsRe = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
 	nameTemplateKeyRe  = regexp.MustCompile(`{{\s*\.([a-zA-Z0-9_]+)\s*}}`)
 	nameTemplateRemRe  = regexp.MustCompile(`{{\s*[^}]*\s*}}`)
-
-	documentContent   = make(map[string][]byte)
-	documentContentMu sync.RWMutex
 )
 
 func interpolateNameTemplate(tpl string, vars map[string]string, componentName string) string {
@@ -1261,13 +1517,13 @@ func interpolateNameTemplate(tpl string, vars map[string]string, componentName s
 }
 
 var (
-	templateVarExprRe   = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
-	templateExprRe      = regexp.MustCompile(`{{\s*[^}]+\s*}}`)
-	atmosComponentRe    = regexp.MustCompile(`{{\s*\.atmos_component\s*}}`)
-	atmosStackRe        = regexp.MustCompile(`{{\s*\.atmos_stack\s*}}`)
+	templateVarExprRe = regexp.MustCompile(`{{\s*\.vars\.([a-zA-Z0-9_]+)\s*}}`)
+	templateExprRe    = regexp.MustCompile(`{{\s*[^}]+\s*}}`)
+	atmosComponentRe  = regexp.MustCompile(`{{\s*\.atmos_component\s*}}`)
+	atmosStackRe      = regexp.MustCompile(`{{\s*\.atmos_stack\s*}}`)
 )
 
-func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, line uint32, char uint32, nameTemplate string) (expr string, resolved string) {
+func (h *LSPHandler) findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, line uint32, char uint32, nameTemplate string) (expr string, resolved string) {
 	// 1. Try matching a VarNode (vars: block)
 	for _, v := range sf.Vars {
 		if v.Range.StartLine == line && v.Range.StartChar <= char && v.Range.EndChar >= char {
@@ -1280,9 +1536,9 @@ func findTemplateExpressionAtPosition(sf *index.StackFile, idx *index.Index, lin
 	// template expressions from the line. If no live content is available, fall
 	// back to reading from disk.
 	if expr == "" {
-		documentContentMu.RLock()
-		content, ok := documentContent[sf.Path]
-		documentContentMu.RUnlock()
+		h.documentContentMu.RLock()
+		content, ok := h.documentContent[sf.Path]
+		h.documentContentMu.RUnlock()
 		if !ok {
 			var err error
 			content, err = os.ReadFile(sf.Path)
@@ -1413,18 +1669,20 @@ func findComponentForLine(sf *index.StackFile, line uint32) string {
 	return best
 }
 
+const maxVarDepth = 50
+
 func collectVars(sf *index.StackFile, idx *index.Index) map[string]string {
 	vars := make(map[string]string)
 	if sf == nil {
 		return vars
 	}
 	visited := make(map[string]bool)
-	collectVarsRecursive(sf, idx, vars, visited)
+	collectVarsRecursive(sf, idx, vars, visited, 0)
 	return vars
 }
 
-func collectVarsRecursive(sf *index.StackFile, idx *index.Index, vars map[string]string, visited map[string]bool) {
-	if sf == nil || visited[sf.Path] {
+func collectVarsRecursive(sf *index.StackFile, idx *index.Index, vars map[string]string, visited map[string]bool, depth int) {
+	if sf == nil || visited[sf.Path] || depth > maxVarDepth {
 		return
 	}
 	visited[sf.Path] = true
@@ -1436,7 +1694,7 @@ func collectVarsRecursive(sf *index.StackFile, idx *index.Index, vars map[string
 			for _, r := range resolved {
 				parent := idx.GetFile(r)
 				if parent != nil {
-					collectVarsRecursive(parent, idx, vars, visited)
+					collectVarsRecursive(parent, idx, vars, visited, depth+1)
 				}
 			}
 		}
@@ -1448,7 +1706,20 @@ func collectVarsRecursive(sf *index.StackFile, idx *index.Index, vars map[string
 }
 
 func errorResponse(content []byte, code int, message string) []byte {
-	return buildErrorResponse(content, code, message)
+	return lsp.BuildErrorResponse(content, code, message)
+}
+
+func buildResponse(id json.RawMessage, result interface{}) ([]byte, error) {
+	resultBytes, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	resp := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result":  json.RawMessage(resultBytes),
+	}
+	return json.Marshal(resp)
 }
 
 func emptyResult(content []byte, id json.RawMessage) []byte {
@@ -1457,7 +1728,10 @@ func emptyResult(content []byte, id json.RawMessage) []byte {
 		"id":      id,
 		"result":  []interface{}{},
 	}
-	b, _ := json.Marshal(resp)
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return errorResponse(content, -32603, "Internal error")
+	}
 	return b
 }
 
@@ -1465,30 +1739,22 @@ func nullResult(content []byte) []byte {
 	var req struct {
 		ID json.RawMessage `json:"id"`
 	}
-	json.Unmarshal(content, &req)
+	if err := json.Unmarshal(content, &req); err != nil {
+		b, _ := json.Marshal(map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      nil,
+			"result":  nil,
+		})
+		return b
+	}
 	resp := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"id":      req.ID,
 		"result":  nil,
 	}
-	b, _ := json.Marshal(resp)
-	return b
-}
-
-func buildErrorResponse(content []byte, code int, message string) []byte {
-	var req struct {
-		ID json.RawMessage `json:"id"`
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return errorResponse(content, -32603, "Internal error")
 	}
-	json.Unmarshal(content, &req)
-
-	resp := map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"error": map[string]interface{}{
-			"code":    code,
-			"message": message,
-		},
-	}
-	b, _ := json.Marshal(resp)
 	return b
 }

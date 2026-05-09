@@ -6,11 +6,10 @@ authors = ["James Gibbard <jgibbard@gmail.com>"]
 description = "Atmos stack configuration support with import resolution, inheritance navigation, and best-practice hints"
 repository = "https://github.com/jgibbarduk/zed-atmos-extension"
 
-languages = ["languages/atmos"]
-
-capabilities = [
-  { kind = "process:exec", command = "atmos-lsp-bridge", args = [] },
-]
+[[capabilities]]
+kind = "process:exec"
+command = "atmos-lsp-bridge"
+args = []
 
 [grammars.yaml]
 repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"

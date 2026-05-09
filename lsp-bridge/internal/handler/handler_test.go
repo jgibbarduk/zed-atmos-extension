@@ -11,10 +11,10 @@ import (
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
 )
 
-// mockDownstream implements DownstreamCaller for tests.
+// mockDownstream implements downstreamCaller for tests.
 type mockDownstream struct{}
 
-func (m *mockDownstream) CallDownstream(content []byte) ([]byte, error) { return nil, nil }
+func (m *mockDownstream) CallDownstream(content []byte) ([]byte, [][]byte, error) { return nil, nil, nil }
 func (m *mockDownstream) SendNotification(content []byte) error         { return nil }
 
 func extractResult(resp []byte, v interface{}) {
@@ -649,13 +649,13 @@ func TestHandleRename_TerraformState(t *testing.T) {
 	}
 	found := false
 	for _, e := range edits {
-		if e.NewText == "renamed-db" {
+		if e.NewText == "renamed-db .outputs.id" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected rename edit with NewText='renamed-db', got %+v", edits)
+		t.Fatalf("expected rename edit with NewText='renamed-db .outputs.id', got %+v", edits)
 	}
 }
 
@@ -1187,5 +1187,70 @@ func TestNodeRange_QuotedKey(t *testing.T) {
 	expectedEndChar := uint32(4 + len("\"quoted-key\""))
 	if comp.Range.EndChar != expectedEndChar {
 		t.Fatalf("expected EndChar=%d for quoted key, got %d", expectedEndChar, comp.Range.EndChar)
+	}
+}
+
+func TestExtractPartialPath_Hyphen(t *testing.T) {
+	line := "    - catalog/vpc-peering"
+	cursor := len(line)
+	got := extractPartialPath(line, cursor)
+	want := "catalog/vpc-peering"
+	if got != want {
+		t.Fatalf("extractPartialPath(%q, %d) = %q, want %q", line, cursor, got, want)
+	}
+}
+
+func TestExtractTemplatePartial_ClosingBrace(t *testing.T) {
+	line := `value: "{{ .atmos_component }}"`
+	// Cursor after the closing braces, inside the quotes
+	cursor := strings.Index(line, `}}"`) + 2
+	got, pos := extractTemplatePartial(line, cursor)
+	if got != "" {
+		t.Fatalf("extractTemplatePartial(%q, %d) = %q (pos=%d), want empty", line, cursor, got, pos)
+	}
+}
+
+func TestFindPathCompletions_ExistingDir(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "catalog", "vpc"), 0755)
+	os.WriteFile(filepath.Join(dir, "catalog", "vpc", "main.yaml"), []byte(""), 0644)
+	os.WriteFile(filepath.Join(dir, "catalog", "vpc", "vars.yaml"), []byte(""), 0644)
+
+	items := findPathCompletions(dir, "catalog/vpc", lsp.Range{})
+	if len(items) == 0 {
+		t.Fatal("expected completions for existing directory, got none")
+	}
+	var labels []string
+	for _, it := range items {
+		labels = append(labels, it["label"].(string))
+	}
+	if len(labels) != 2 {
+		t.Fatalf("expected 2 completions, got %d: %v", len(labels), labels)
+	}
+}
+
+func TestDocumentContent_DidClose(t *testing.T) {
+	h := New(nil, &mockDownstream{})
+	uri := "file:///test.yaml"
+	path := strings.TrimPrefix(uri, "file://")
+	h.documentContent[path] = []byte("test content")
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/didClose",
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": uri},
+		},
+	})
+
+	handled, _, _, err := h.HandleMethod("textDocument/didClose", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if _, ok := h.documentContent[path]; ok {
+		t.Fatal("expected documentContent to be deleted after didClose")
 	}
 }

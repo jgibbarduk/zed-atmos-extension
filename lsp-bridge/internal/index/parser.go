@@ -20,6 +20,7 @@ func ParseYAMLContent(path string, content []byte) *StackFile {
 
 	var doc yaml.Node
 	if err := yaml.Unmarshal(content, &doc); err != nil {
+		sf.ParseError = err.Error()
 		return sf
 	}
 

@@ -19,9 +19,9 @@ type Range struct {
 }
 
 type ImportNode struct {
-	RawPath   string   `json:"rawPath"`
-	Range     Range    `json:"range"`
-	Resolves  []string `json:"resolves"`
+	RawPath  string   `json:"rawPath"`
+	Range    Range    `json:"range"`
+	Resolves []string `json:"resolves"`
 }
 
 type CompNode struct {
@@ -80,6 +80,7 @@ type StackFile struct {
 	TerraformState []TerraformStateRef     `json:"terraform_state"`
 	BackendTypes   []BackendTypeNode       `json:"backend_types"`
 	SettingsDeps   []SettingsDependsOnNode `json:"settings_deps"`
+	ParseError     string                  `json:"-"` // YAML parse error, if any
 }
 
 type Index struct {
@@ -104,6 +105,9 @@ func New(basePath string) (*Index, error) {
 }
 
 func (idx *Index) StartWatching(onChange func()) error {
+	if idx.watcher != nil {
+		return nil
+	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -125,6 +129,14 @@ func (idx *Index) StartWatching(onChange func()) error {
 				if strings.HasSuffix(event.Name, ".yaml") || strings.HasSuffix(event.Name, ".yml") {
 					if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
 						idx.ReindexFile(event.Name)
+					} else if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+						idx.RemoveFile(event.Name)
+					}
+					if !debounce.Stop() {
+						select {
+						case <-debounce.C:
+						default:
+						}
 					}
 					debounce.Reset(200 * time.Millisecond)
 				}
@@ -206,14 +218,15 @@ func deepCopyStackFile(sf *StackFile) *StackFile {
 		return nil
 	}
 	out := &StackFile{
-		Path: sf.Path,
+		Path:       sf.Path,
+		ParseError: sf.ParseError,
 	}
 	if len(sf.Imports) > 0 {
 		out.Imports = make([]ImportNode, len(sf.Imports))
 		for i, imp := range sf.Imports {
 			out.Imports[i] = ImportNode{
 				RawPath:  imp.RawPath,
-				Range:   imp.Range,
+				Range:    imp.Range,
 				Resolves: append([]string(nil), imp.Resolves...),
 			}
 		}
@@ -249,10 +262,20 @@ func deepCopyStackFile(sf *StackFile) *StackFile {
 	return out
 }
 
+// GetFile returns a deep copy of the StackFile for the given path.
+// Callers may safely modify the returned value.
 func (idx *Index) GetFile(path string) *StackFile {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	return deepCopyStackFile(idx.files[path])
+}
+
+// GetFileUnsafe returns the StackFile directly without copying.
+// The returned pointer MUST NOT be modified. Use only for read-only access.
+func (idx *Index) GetFileUnsafe(path string) *StackFile {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.files[path]
 }
 
 func (idx *Index) FindComponent(name string) []StackFile {
@@ -260,7 +283,7 @@ func (idx *Index) FindComponent(name string) []StackFile {
 	defer idx.mu.RUnlock()
 
 	paths := idx.byComponent[name]
-	var results []StackFile
+	results := make([]StackFile, 0, len(paths))
 	for _, p := range paths {
 		if f, ok := idx.files[p]; ok {
 			results = append(results, *deepCopyStackFile(f))
@@ -273,11 +296,15 @@ func (idx *Index) ResolveImport(rawPath string, fromDir string) []string {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
+	// Strip any existing extension so we don't double-append.
+	cleanPath := strings.TrimSuffix(rawPath, ".yaml")
+	cleanPath = strings.TrimSuffix(cleanPath, ".yml")
+
 	candidates := []string{
-		filepath.Join(idx.basePath, rawPath+".yaml"),
-		filepath.Join(idx.basePath, rawPath+".yml"),
-		filepath.Join(fromDir, rawPath+".yaml"),
-		filepath.Join(fromDir, rawPath+".yml"),
+		filepath.Join(idx.basePath, cleanPath+".yaml"),
+		filepath.Join(idx.basePath, cleanPath+".yml"),
+		filepath.Join(fromDir, cleanPath+".yaml"),
+		filepath.Join(fromDir, cleanPath+".yml"),
 	}
 
 	var resolved []string
@@ -293,9 +320,6 @@ func (idx *Index) FindImporters(rawPath string) []string {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	paths := idx.byImport[rawPath]
-	if len(paths) == 0 {
-		return nil
-	}
 	out := make([]string, len(paths))
 	copy(out, paths)
 	return out
@@ -305,9 +329,6 @@ func (idx *Index) FindInheritors(name string) []string {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 	paths := idx.byInherit[name]
-	if len(paths) == 0 {
-		return nil
-	}
 	out := make([]string, len(paths))
 	copy(out, paths)
 	return out
@@ -392,6 +413,57 @@ func (idx *Index) ReindexFile(path string) {
 			idx.byInherit[meta.Inherits] = append(idx.byInherit[meta.Inherits], path)
 		}
 	}
+}
+
+func (idx *Index) RemoveFile(path string) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	oldFile, existed := idx.files[path]
+	if !existed || oldFile == nil {
+		delete(idx.files, path)
+		return
+	}
+
+	for _, old := range oldFile.Imports {
+		if updated, ok := removePath(idx.byImport[old.RawPath], path); ok {
+			if len(updated) == 0 {
+				delete(idx.byImport, old.RawPath)
+			} else {
+				idx.byImport[old.RawPath] = updated
+			}
+		}
+	}
+	for _, old := range oldFile.Comps {
+		if updated, ok := removePath(idx.byComponent[old.Name], path); ok {
+			if len(updated) == 0 {
+				delete(idx.byComponent, old.Name)
+			} else {
+				idx.byComponent[old.Name] = updated
+			}
+		}
+	}
+	for _, old := range oldFile.Metadata {
+		if old.Component != "" {
+			if updated, ok := removePath(idx.byComponent[old.Component], path); ok {
+				if len(updated) == 0 {
+					delete(idx.byComponent, old.Component)
+				} else {
+					idx.byComponent[old.Component] = updated
+				}
+			}
+		}
+		if old.Inherits != "" {
+			if updated, ok := removePath(idx.byInherit[old.Inherits], path); ok {
+				if len(updated) == 0 {
+					delete(idx.byInherit, old.Inherits)
+				} else {
+					idx.byInherit[old.Inherits] = updated
+				}
+			}
+		}
+	}
+	delete(idx.files, path)
 }
 
 func (idx *Index) UpsertFile(path string, sf *StackFile) {

@@ -47,11 +47,11 @@ jobs:
         with:
           targets: wasm32-wasip2
       - name: Build WASM
-        run: cargo build --target wasm32-wasip2 --release
+        run: cargo build --target wasm32-wasip2
       - uses: actions/upload-artifact@v4
         with:
           name: extension-wasm
-          path: target/wasm32-wasip2/release/zed_atmos_language.wasm
+          path: target/wasm32-wasip2/debug/zed_atmos_language.wasm
 
   release:
     needs: [build-go, build-wasm]

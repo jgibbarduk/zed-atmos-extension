@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -11,16 +10,6 @@ import (
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/proxy"
 )
-
-type nopDownstream struct{}
-
-func (n *nopDownstream) CallDownstream(content []byte) ([]byte, error) {
-	return nil, fmt.Errorf("downstream atmos LSP not available")
-}
-
-func (n *nopDownstream) SendNotification(content []byte) error {
-	return nil
-}
 
 func main() {
 	debug := flag.Bool("debug", false, "enable debug logging")
