@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
@@ -278,7 +279,17 @@ func checkImportOrder(file *index.StackFile, dir string, idx *index.Index) []dia
 func checkUnquotedVersion(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
 	var diags []diagnostic
 	for _, v := range file.Vars {
-		if strings.Contains(strings.ToLower(v.Key), "version") && !v.IsQuoted {
+		if !strings.Contains(strings.ToLower(v.Key), "version") || v.IsQuoted {
+			continue
+		}
+		// Skip values that YAML would not parse as numbers (booleans, null, strings).
+		lowerVal := strings.ToLower(v.Value)
+		if lowerVal == "true" || lowerVal == "false" || lowerVal == "null" || lowerVal == "" {
+			continue
+		}
+		// Only warn when the value would be parsed as a number by YAML,
+		// because that's when trailing zeros can be lost (e.g. 1.10 → 1.1).
+		if _, err := strconv.ParseFloat(v.Value, 64); err == nil {
 			diags = append(diags, diagnostic{
 				Severity: SeverityWarning,
 				Message:  fmt.Sprintf("Version '%s' should be quoted to prevent YAML float parsing", v.Value),
