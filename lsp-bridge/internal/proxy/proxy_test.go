@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"os/exec"
 	"io"
 	"strings"
 	"testing"
@@ -341,5 +342,26 @@ func TestRun_eof(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not exit on EOF")
+	}
+}
+
+func TestClose_withProcess(t *testing.T) {
+	// Start a short-lived subprocess to exercise the cmd.Wait() path.
+	cmd := exec.Command("sleep", "0")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &Proxy{cmd: cmd, stdin: stdin, stdout: stdout, stdoutBuf: bufio.NewReader(stdout)}
+	if err := p.Close(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

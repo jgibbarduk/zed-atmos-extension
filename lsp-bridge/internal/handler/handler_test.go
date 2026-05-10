@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
@@ -1636,5 +1637,272 @@ func TestHandleDiagnostics_DidSave(t *testing.T) {
 	// Verify documentContent was cleared
 	if _, ok := h.documentContent[stackPath]; ok {
 		t.Fatal("expected documentContent to be cleared after didSave")
+	}
+}
+
+func TestHandleDefinition_MetadataComponent(t *testing.T) {
+	dir := t.TempDir()
+	compPath := filepath.Join(dir, "components/terraform/vpc.yaml")
+	os.MkdirAll(filepath.Dir(compPath), 0755)
+	os.WriteFile(compPath, []byte("vars:\n  name: vpc\n"), 0644)
+
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    vpc:\n      metadata:\n        component: vpc\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 4, "character": 8},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/definition", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var locations []map[string]interface{}
+	extractResult(resp, &locations)
+	if len(locations) == 0 {
+		t.Fatal("expected at least one location for metadata.component definition")
+	}
+}
+
+func TestHandleDefinition_MetadataInherits(t *testing.T) {
+	dir := t.TempDir()
+	// Need a stack file that defines component "base" so FindComponent can find it
+	baseStackPath := filepath.Join(dir, "stacks/base.yaml")
+	os.MkdirAll(filepath.Dir(baseStackPath), 0755)
+	os.WriteFile(baseStackPath, []byte("components:\n  terraform:\n    base:\n      vars:\n        name: base\n"), 0644)
+
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    vpc:\n      metadata:\n        inherits: base\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 4, "character": 8},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/definition", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var locations []map[string]interface{}
+	extractResult(resp, &locations)
+	if len(locations) == 0 {
+		t.Fatal("expected at least one location for metadata.inherits definition")
+	}
+}
+
+func TestHandleDefinition_TerraformState(t *testing.T) {
+	dir := t.TempDir()
+	// Need a stack file that defines component "db" so FindComponent can find it
+	dbStackPath := filepath.Join(dir, "stacks/db.yaml")
+	os.MkdirAll(filepath.Dir(dbStackPath), 0755)
+	os.WriteFile(dbStackPath, []byte("components:\n  terraform:\n    db:\n      vars:\n        name: db\n"), 0644)
+
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    vpc:\n      vars:\n        state: !terraform.state db .outputs.id\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 4, "character": 10},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/definition", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var locations []map[string]interface{}
+	extractResult(resp, &locations)
+	if len(locations) == 0 {
+		t.Fatal("expected at least one location for terraform.state definition")
+	}
+}
+
+func TestHandleHover_TerraformState(t *testing.T) {
+	dir := t.TempDir()
+	compPath := filepath.Join(dir, "components/terraform/db.yaml")
+	os.MkdirAll(filepath.Dir(compPath), 0755)
+	os.WriteFile(compPath, []byte("vars:\n  name: db\n"), 0644)
+
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    vpc:\n      vars:\n        state: !terraform.state db .outputs.id\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 4, "character": 10},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/hover", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	contents := result["contents"].(map[string]interface{})
+	value := contents["value"].(string)
+	if !strings.Contains(value, "Remote state reference") {
+		t.Fatalf("expected 'Remote state reference' in hover, got: %s", value)
+	}
+	if !strings.Contains(value, "db") {
+		t.Fatalf("expected component 'db' in hover, got: %s", value)
+	}
+}
+
+func TestHandlerClose(t *testing.T) {
+	dir := t.TempDir()
+	idx, _ := index.New(dir)
+	h := New(idx, &mockDownstream{})
+
+	// Set up a pending diagnostic timer
+	h.diagMu.Lock()
+	h.diagPendingURI = "file:///test.yaml"
+	h.diagPendingPath = "/test.yaml"
+	h.diagTimer = time.AfterFunc(1*time.Hour, func() {})
+	h.diagMu.Unlock()
+
+	h.Close()
+
+	// Verify channel is closed (reading from closed channel should return zero value immediately)
+	select {
+	case _, ok := <-h.Notifications():
+		if ok {
+			t.Fatal("expected notification channel to be closed")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("notification channel was not closed")
+	}
+}
+
+func TestHandleInitialized(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "initialized",
+		"params":  map[string]interface{}{},
+	})
+
+	handled, _, _, err := h.HandleMethod("initialized", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if !h.initialized.Load() {
+		t.Fatal("expected initialized to be true")
+	}
+}
+
+func TestHandleHover_YAMLTag(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  home: !env HOME\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 1, "character": 4},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/hover", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	contents := result["contents"].(map[string]interface{})
+	value := contents["value"].(string)
+	if !strings.Contains(value, "YAML function: !env") {
+		t.Fatalf("expected 'YAML function: !env' in hover, got: %s", value)
 	}
 }
