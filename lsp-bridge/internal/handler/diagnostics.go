@@ -192,6 +192,11 @@ func checkMetadataComponentDir(file *index.StackFile, dir string, idx *index.Ind
 		if meta.Component == "" {
 			continue
 		}
+		// Abstract components are blueprints, not references to a real component
+		// directory. Skip the existence check for them.
+		if meta.Type == "abstract" {
+			continue
+		}
 		compDir := filepath.Join(componentsBase, meta.Component)
 		cleanComp, compErr := filepath.Abs(compDir)
 		if compErr != nil {
@@ -365,6 +370,7 @@ func checkDependenciesComponents(file *index.StackFile, dir string, idx *index.I
 		}
 		refs := idx.FindComponent(dep.Component)
 		if len(refs) == 0 {
+			log.Printf("checkDependenciesComponents: file=%s dep='%s' not found in index", file.Path, dep.Component)
 			diags = append(diags, diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("Dependency component '%s' not found", dep.Component),
