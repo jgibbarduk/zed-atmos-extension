@@ -1242,6 +1242,23 @@ func TestFindPathCompletions_ExistingDir(t *testing.T) {
 	if len(labels) != 3 {
 		t.Fatalf("expected 3 completions, got %d: %v", len(labels), labels)
 	}
+
+	// Verify directory items: label ends with "/" but newText does not,
+	// and commitCharacters includes "/".
+	for _, it := range items {
+		label := it["label"].(string)
+		te := it["textEdit"].(map[string]interface{})
+		newText := te["newText"].(string)
+		if strings.HasSuffix(label, "/") {
+			if strings.HasSuffix(newText, "/") {
+				t.Fatalf("directory item %q newText must not end with '/': got %q", label, newText)
+			}
+			cc, ok := it["commitCharacters"].([]string)
+			if !ok || len(cc) == 0 || cc[0] != "/" {
+				t.Fatalf("directory item %q missing commitCharacters ['/']", label)
+			}
+		}
+	}
 }
 
 func TestDocumentContent_DidClose(t *testing.T) {
