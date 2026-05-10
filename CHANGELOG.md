@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/jgibbarduk/zed-atmos-extension/compare/v0.2.1...v0.3.0) (2026-05-10)
+
+
+### Features
+
+* **handler:** auto-trigger next path completion level on directory accept ([c6bccf7](https://github.com/jgibbarduk/zed-atmos-extension/commit/c6bccf7e0237cdf10ac4f92a88e151050da419a6))
+* **handler:** auto-trigger next path level on directory accept ([7efbfde](https://github.com/jgibbarduk/zed-atmos-extension/commit/7efbfde5614d635eeea3968075d321bde0bb0565))
+* **handler:** fluid nested path completions with isIncomplete ([630866a](https://github.com/jgibbarduk/zed-atmos-extension/commit/630866a04069c940fd79466a32af0044ec2b4b5c))
+
+
+### Bug Fixes
+
+* **handler:** preserve index data when didChange parses invalid YAML ([d4df652](https://github.com/jgibbarduk/zed-atmos-extension/commit/d4df652f762d34e37a69f493cb65ba1225a0c20b))
+
 ## [0.2.1](https://github.com/jgibbarduk/zed-atmos-extension/compare/v0.2.0...v0.2.1) (2026-05-10)
 
 
