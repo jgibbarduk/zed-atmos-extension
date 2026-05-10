@@ -183,17 +183,30 @@ func checkMetadataType(file *index.StackFile, dir string, idx *index.Index) []di
 
 func checkMetadataComponentDir(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
 	var diags []diagnostic
+	componentsBase := filepath.Join(idx.BasePath(), "components")
 	for _, meta := range file.Metadata {
-		if meta.Component != "" {
-			compDir := filepath.Join(idx.BasePath(), "components", meta.Component)
-			if _, err := os.Stat(compDir); os.IsNotExist(err) {
-				diags = append(diags, diagnostic{
-					Severity: SeverityError,
-					Message:  fmt.Sprintf("metadata.component '%s' does not exist at %s", meta.Component, compDir),
-					Range:    toLSPRange(meta.ComponentRange),
-					Source:   "atmos-component",
-				})
-			}
+		if meta.Component == "" {
+			continue
+		}
+		compDir := filepath.Join(componentsBase, meta.Component)
+		cleanComp, _ := filepath.Abs(compDir)
+		cleanBase, _ := filepath.Abs(componentsBase)
+		if cleanComp != cleanBase && !strings.HasPrefix(cleanComp, cleanBase+string(filepath.Separator)) {
+			diags = append(diags, diagnostic{
+				Severity: SeverityError,
+				Message:  fmt.Sprintf("metadata.component '%s' contains invalid path traversal characters", meta.Component),
+				Range:    toLSPRange(meta.ComponentRange),
+				Source:   "atmos-component",
+			})
+			continue
+		}
+		if _, err := os.Stat(compDir); os.IsNotExist(err) {
+			diags = append(diags, diagnostic{
+				Severity: SeverityError,
+				Message:  fmt.Sprintf("metadata.component '%s' does not exist at %s", meta.Component, compDir),
+				Range:    toLSPRange(meta.ComponentRange),
+				Source:   "atmos-component",
+			})
 		}
 	}
 	return diags

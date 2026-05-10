@@ -190,6 +190,9 @@ func (m *mockHandler) Notifications() <-chan []byte {
 
 func (m *mockHandler) Close() {
 	close(m.closeCh)
+	if m.notifCh != nil {
+		close(m.notifCh)
+	}
 }
 
 func TestRun_handlerHandled(t *testing.T) {

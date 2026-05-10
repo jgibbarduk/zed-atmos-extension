@@ -13,6 +13,12 @@ import (
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
 )
 
+const (
+	// shutdownTimeout is how long we wait for the downstream process to exit
+	// gracefully before force-killing it.
+	shutdownTimeout = 5 * time.Second
+)
+
 type Handler interface {
 	HandleMethod(method string, content []byte) (handled bool, response []byte, notifications [][]byte, err error)
 	Notifications() <-chan []byte
@@ -191,12 +197,15 @@ func (p *Proxy) Close() error {
 	if p.stdin != nil {
 		p.stdin.Close()
 	}
+	if p.stdout != nil {
+		p.stdout.Close()
+	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		done := make(chan error, 1)
 		go func() { done <- p.cmd.Wait() }()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(shutdownTimeout):
 			_ = p.cmd.Process.Kill()
 		}
 	}

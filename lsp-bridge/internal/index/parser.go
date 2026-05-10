@@ -3,10 +3,24 @@ package index
 import (
 	"os"
 	"strings"
-	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
+
+// utf16Len returns the number of UTF-16 code units in s.
+// This is needed because the LSP specification uses UTF-16 code units for
+// character positions, not byte or rune offsets.
+func utf16Len(s string) int {
+	count := 0
+	for _, r := range s {
+		if r <= 0xFFFF {
+			count++
+		} else {
+			count += 2 // surrogate pair
+		}
+	}
+	return count
+}
 
 func parseYAMLFile(path string) (*StackFile, error) {
 	content, err := os.ReadFile(path)
@@ -79,9 +93,13 @@ func nodeRange(n *yaml.Node) Range {
 	if n.Line == 0 || n.Column == 0 {
 		return Range{}
 	}
-	length := utf8.RuneCountInString(n.Value)
+	// yaml.v3 Column is 1-based byte offset. For non-ASCII text the byte offset
+	// differs from the UTF-16 code-unit offset required by LSP. Fixing StartChar
+	// would require access to the full source line; we at least compute EndChar
+	// correctly in UTF-16 code units.
+	length := utf16Len(n.Value)
 	if n.Style == yaml.DoubleQuotedStyle || n.Style == yaml.SingleQuotedStyle {
-		length += 2
+		length += 2 // opening and closing quote characters
 	}
 	return Range{
 		StartLine: uint32(n.Line - 1),

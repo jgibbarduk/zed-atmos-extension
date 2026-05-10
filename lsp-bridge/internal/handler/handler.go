@@ -22,6 +22,11 @@ const (
 	completionItemVariable = lsp.CompletionItemKindVariable
 	completionItemFile     = lsp.CompletionItemKindFile
 	completionItemFolder   = lsp.CompletionItemKindFolder
+
+	// diagDebounce is the delay before recomputing diagnostics after an edit.
+	// 300 ms strikes a balance between responsiveness and avoiding redundant
+	// work during rapid keystrokes.
+	diagDebounce = 300 * time.Millisecond
 )
 
 type downstreamCaller interface {
@@ -62,6 +67,7 @@ type LSPHandler struct {
 	diagPendingURI   string
 	diagPendingPath  string
 	closed           atomic.Bool
+	closeMu          sync.Mutex
 }
 
 func New(idx *index.Index, downstream downstreamCaller) *LSPHandler {
@@ -90,6 +96,8 @@ func (h *LSPHandler) Close() {
 		h.diagTimer.Stop()
 	}
 	h.diagMu.Unlock()
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
 	close(h.notificationsCh)
 }
 
@@ -921,6 +929,10 @@ func findTemplateCompletions(idx *index.Index, path, partial string, replaceRang
 			}
 		}
 	}
+	// Sort by label for deterministic ordering.
+	sort.Slice(items, func(i, j int) bool {
+		return items[i]["label"].(string) < items[j]["label"].(string)
+	})
 	return items
 }
 
@@ -1384,13 +1396,11 @@ func (h *LSPHandler) publishDiagnostics(uri string, diags []diagnostic) {
 		log.Printf("diagnostics: failed to marshal notification: %v", err)
 		return
 	}
-	// Guard against a race where Close() closes the channel between the
-	// closed check above and the send below.
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("diagnostics: recovered from channel send panic: %v", r)
-		}
-	}()
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closed.Load() {
+		return
+	}
 	select {
 	case h.notificationsCh <- notifBytes:
 	default:
@@ -1509,7 +1519,7 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 	if h.diagTimer != nil {
 		h.diagTimer.Stop()
 	}
-	h.diagTimer = time.AfterFunc(300*time.Millisecond, func() {
+	h.diagTimer = time.AfterFunc(diagDebounce, func() {
 		h.diagMu.Lock()
 		uri := h.diagPendingURI
 		path := h.diagPendingPath

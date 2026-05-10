@@ -3,12 +3,20 @@ package index
 import (
 	"io/fs"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+)
+
+const (
+	// watcherDebounce is the delay after the last file-change event before
+	// triggering a full reindex. 200 ms coalesces rapid saves without
+	// introducing noticeable latency.
+	watcherDebounce = 200 * time.Millisecond
 )
 
 type Range struct {
@@ -153,7 +161,15 @@ func (idx *Index) StartWatching(onChange func()) error {
 						default:
 						}
 					}
-					debounce.Reset(200 * time.Millisecond)
+					debounce.Reset(watcherDebounce)
+				} else if event.Op&fsnotify.Create != 0 {
+					// A new directory was created — add it to the watcher so
+					// files created inside it are tracked.
+					if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+						if err := w.Add(event.Name); err != nil {
+							log.Printf("watcher: failed to add new directory %s: %v", event.Name, err)
+						}
+					}
 				}
 			case <-debounce.C:
 				if cb != nil {
@@ -168,8 +184,9 @@ func (idx *Index) StartWatching(onChange func()) error {
 		}
 	}()
 
-	return filepath.WalkDir(idx.basePath, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(idx.basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			log.Printf("watcher: error accessing %s: %v", path, err)
 			return nil
 		}
 		if d.IsDir() {
@@ -177,6 +194,10 @@ func (idx *Index) StartWatching(onChange func()) error {
 		}
 		return nil
 	})
+	if err != nil {
+		log.Printf("watcher: WalkDir failed: %v", err)
+	}
+	return nil
 }
 
 func (idx *Index) Reindex() {
@@ -190,8 +211,9 @@ func (idx *Index) Reindex() {
 	byComponent := make(map[string][]string)
 	byInherit := make(map[string][]string)
 
-	filepath.WalkDir(idx.basePath, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(idx.basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			log.Printf("reindex: error accessing %s: %v", path, err)
 			return nil
 		}
 		if d.IsDir() {
@@ -225,6 +247,9 @@ func (idx *Index) Reindex() {
 		}
 		return nil
 	})
+	if err != nil {
+		log.Printf("reindex: WalkDir failed: %v", err)
+	}
 
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
