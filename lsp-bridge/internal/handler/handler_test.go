@@ -1230,7 +1230,8 @@ func TestFindPathCompletions_ExistingDir(t *testing.T) {
 }
 
 func TestDocumentContent_DidClose(t *testing.T) {
-	h := New(nil, &mockDownstream{})
+	idx, _ := index.New(t.TempDir())
+	h := New(idx, &mockDownstream{})
 	uri := "file:///test.yaml"
 	path := strings.TrimPrefix(uri, "file://")
 	h.documentContent[path] = []byte("test content")

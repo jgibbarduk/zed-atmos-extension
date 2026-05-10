@@ -65,6 +65,9 @@ type LSPHandler struct {
 }
 
 func New(idx *index.Index, downstream downstreamCaller) *LSPHandler {
+	if idx == nil {
+		panic("handler.New: idx is nil")
+	}
 	return &LSPHandler{
 		idx:             idx,
 		downstream:      downstream,
@@ -971,7 +974,7 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 	if err != nil {
 		return nil
 	}
-	if !strings.HasPrefix(cleanSearch, cleanBase) {
+	if cleanSearch != cleanBase && !strings.HasPrefix(cleanSearch, cleanBase+string(filepath.Separator)) {
 		return nil
 	}
 	info, err := os.Stat(searchDir)
@@ -980,7 +983,7 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 		// Partial is not an existing directory; try its parent.
 		searchDir = filepath.Join(basePath, filepath.Dir(partial))
 		cleanSearch, _ = filepath.Abs(searchDir)
-		if !strings.HasPrefix(cleanSearch, cleanBase) {
+		if cleanSearch != cleanBase && !strings.HasPrefix(cleanSearch, cleanBase+string(filepath.Separator)) {
 			return nil
 		}
 		info, err = os.Stat(searchDir)
@@ -1104,6 +1107,12 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 	path := strings.TrimPrefix(req.Params.TextDocument.URI, "file://")
 	f := h.idx.GetFile(path)
 
+	// Pre-compute vars once per hover request — used by multiple hover targets.
+	var vars map[string]string
+	if f != nil {
+		vars = collectVars(f, h.idx)
+	}
+
 	var hoverContent map[string]interface{}
 
 	if f != nil {
@@ -1172,7 +1181,6 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 						}
 					}
 
-					vars := collectVars(f, h.idx)
 					if len(vars) > 0 {
 						hb.rule()
 						hb.header("Accumulated vars")
@@ -1318,7 +1326,6 @@ func (h *LSPHandler) handleHover(content []byte) (bool, []byte, [][]byte, error)
 
 	// Show resolved variables view for terminal stacks
 	if hoverContent == nil && h.nameTemplate != "" && f != nil && len(f.Comps) > 0 {
-		vars := collectVars(f, h.idx)
 		if len(vars) > 0 {
 			hb := hoverBuilder{}
 			hb.header("Resolved variables for this stack")

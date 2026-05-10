@@ -1,8 +1,8 @@
 package index
 
 import (
+	"io/fs"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -168,11 +168,11 @@ func (idx *Index) StartWatching(onChange func()) error {
 		}
 	}()
 
-	return filepath.Walk(idx.basePath, func(path string, info os.FileInfo, err error) error {
+	return filepath.WalkDir(idx.basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return w.Add(path)
 		}
 		return nil
@@ -183,19 +183,18 @@ func (idx *Index) Reindex() {
 	if idx.basePath == "" {
 		return
 	}
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
 
-	idx.files = make(map[string]*StackFile)
-	idx.byImport = make(map[string][]string)
-	idx.byComponent = make(map[string][]string)
-	idx.byInherit = make(map[string][]string)
+	// Build new maps outside the lock so filesystem I/O doesn't block readers.
+	files := make(map[string]*StackFile)
+	byImport := make(map[string][]string)
+	byComponent := make(map[string][]string)
+	byInherit := make(map[string][]string)
 
-	filepath.Walk(idx.basePath, func(path string, info os.FileInfo, err error) error {
+	filepath.WalkDir(idx.basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
 		if !strings.HasSuffix(path, ".yaml") && !strings.HasSuffix(path, ".yml") {
@@ -209,23 +208,30 @@ func (idx *Index) Reindex() {
 		if sf == nil {
 			sf = &StackFile{Path: path}
 		}
-		idx.files[path] = sf
+		files[path] = sf
 		for _, imp := range sf.Imports {
-			idx.byImport[imp.RawPath] = append(idx.byImport[imp.RawPath], path)
+			byImport[imp.RawPath] = append(byImport[imp.RawPath], path)
 		}
 		for _, comp := range sf.Comps {
-			idx.byComponent[comp.Name] = append(idx.byComponent[comp.Name], path)
+			byComponent[comp.Name] = append(byComponent[comp.Name], path)
 		}
 		for _, meta := range sf.Metadata {
 			if meta.Component != "" {
-				idx.byComponent[meta.Component] = append(idx.byComponent[meta.Component], path)
+				byComponent[meta.Component] = append(byComponent[meta.Component], path)
 			}
 			if meta.Inherits != "" {
-				idx.byInherit[meta.Inherits] = append(idx.byInherit[meta.Inherits], path)
+				byInherit[meta.Inherits] = append(byInherit[meta.Inherits], path)
 			}
 		}
 		return nil
 	})
+
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.files = files
+	idx.byImport = byImport
+	idx.byComponent = byComponent
+	idx.byInherit = byInherit
 }
 
 func deepCopyStackFile(sf *StackFile) *StackFile {
@@ -375,6 +381,52 @@ func removePath(slice []string, target string) ([]string, bool) {
 	return slice, false
 }
 
+// removeFromIndexes removes all references to `path` from the reverse indexes
+// using the entries in `old`. Callers must hold idx.mu.
+func (idx *Index) removeFromIndexes(path string, old *StackFile) {
+	if old == nil {
+		return
+	}
+	for _, o := range old.Imports {
+		if updated, ok := removePath(idx.byImport[o.RawPath], path); ok {
+			if len(updated) == 0 {
+				delete(idx.byImport, o.RawPath)
+			} else {
+				idx.byImport[o.RawPath] = updated
+			}
+		}
+	}
+	for _, o := range old.Comps {
+		if updated, ok := removePath(idx.byComponent[o.Name], path); ok {
+			if len(updated) == 0 {
+				delete(idx.byComponent, o.Name)
+			} else {
+				idx.byComponent[o.Name] = updated
+			}
+		}
+	}
+	for _, o := range old.Metadata {
+		if o.Component != "" {
+			if updated, ok := removePath(idx.byComponent[o.Component], path); ok {
+				if len(updated) == 0 {
+					delete(idx.byComponent, o.Component)
+				} else {
+					idx.byComponent[o.Component] = updated
+				}
+			}
+		}
+		if o.Inherits != "" {
+			if updated, ok := removePath(idx.byInherit[o.Inherits], path); ok {
+				if len(updated) == 0 {
+					delete(idx.byInherit, o.Inherits)
+				} else {
+					idx.byInherit[o.Inherits] = updated
+				}
+			}
+		}
+	}
+}
+
 func (idx *Index) ReindexFile(path string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -389,45 +441,8 @@ func (idx *Index) ReindexFile(path string) {
 		sf = &StackFile{Path: path}
 	}
 
-	if existed && oldFile != nil {
-		for _, old := range oldFile.Imports {
-			if updated, ok := removePath(idx.byImport[old.RawPath], path); ok {
-				if len(updated) == 0 {
-					delete(idx.byImport, old.RawPath)
-				} else {
-					idx.byImport[old.RawPath] = updated
-				}
-			}
-		}
-		for _, old := range oldFile.Comps {
-			if updated, ok := removePath(idx.byComponent[old.Name], path); ok {
-				if len(updated) == 0 {
-					delete(idx.byComponent, old.Name)
-				} else {
-					idx.byComponent[old.Name] = updated
-				}
-			}
-		}
-		for _, old := range oldFile.Metadata {
-			if old.Component != "" {
-				if updated, ok := removePath(idx.byComponent[old.Component], path); ok {
-					if len(updated) == 0 {
-						delete(idx.byComponent, old.Component)
-					} else {
-						idx.byComponent[old.Component] = updated
-					}
-				}
-			}
-			if old.Inherits != "" {
-				if updated, ok := removePath(idx.byInherit[old.Inherits], path); ok {
-					if len(updated) == 0 {
-						delete(idx.byInherit, old.Inherits)
-					} else {
-						idx.byInherit[old.Inherits] = updated
-					}
-				}
-			}
-		}
+	if existed {
+		idx.removeFromIndexes(path, oldFile)
 	}
 
 	idx.files[path] = sf
@@ -457,44 +472,7 @@ func (idx *Index) RemoveFile(path string) {
 		return
 	}
 
-	for _, old := range oldFile.Imports {
-		if updated, ok := removePath(idx.byImport[old.RawPath], path); ok {
-			if len(updated) == 0 {
-				delete(idx.byImport, old.RawPath)
-			} else {
-				idx.byImport[old.RawPath] = updated
-			}
-		}
-	}
-	for _, old := range oldFile.Comps {
-		if updated, ok := removePath(idx.byComponent[old.Name], path); ok {
-			if len(updated) == 0 {
-				delete(idx.byComponent, old.Name)
-			} else {
-				idx.byComponent[old.Name] = updated
-			}
-		}
-	}
-	for _, old := range oldFile.Metadata {
-		if old.Component != "" {
-			if updated, ok := removePath(idx.byComponent[old.Component], path); ok {
-				if len(updated) == 0 {
-					delete(idx.byComponent, old.Component)
-				} else {
-					idx.byComponent[old.Component] = updated
-				}
-			}
-		}
-		if old.Inherits != "" {
-			if updated, ok := removePath(idx.byInherit[old.Inherits], path); ok {
-				if len(updated) == 0 {
-					delete(idx.byInherit, old.Inherits)
-				} else {
-					idx.byInherit[old.Inherits] = updated
-				}
-			}
-		}
-	}
+	idx.removeFromIndexes(path, oldFile)
 	delete(idx.files, path)
 }
 
@@ -507,46 +485,8 @@ func (idx *Index) UpsertFile(path string, sf *StackFile) {
 	}
 
 	oldFile, existed := idx.files[path]
-
-	if existed && oldFile != nil {
-		for _, old := range oldFile.Imports {
-			if updated, ok := removePath(idx.byImport[old.RawPath], path); ok {
-				if len(updated) == 0 {
-					delete(idx.byImport, old.RawPath)
-				} else {
-					idx.byImport[old.RawPath] = updated
-				}
-			}
-		}
-		for _, old := range oldFile.Comps {
-			if updated, ok := removePath(idx.byComponent[old.Name], path); ok {
-				if len(updated) == 0 {
-					delete(idx.byComponent, old.Name)
-				} else {
-					idx.byComponent[old.Name] = updated
-				}
-			}
-		}
-		for _, old := range oldFile.Metadata {
-			if old.Component != "" {
-				if updated, ok := removePath(idx.byComponent[old.Component], path); ok {
-					if len(updated) == 0 {
-						delete(idx.byComponent, old.Component)
-					} else {
-						idx.byComponent[old.Component] = updated
-					}
-				}
-			}
-			if old.Inherits != "" {
-				if updated, ok := removePath(idx.byInherit[old.Inherits], path); ok {
-					if len(updated) == 0 {
-						delete(idx.byInherit, old.Inherits)
-					} else {
-						idx.byInherit[old.Inherits] = updated
-					}
-				}
-			}
-		}
+	if existed {
+		idx.removeFromIndexes(path, oldFile)
 	}
 
 	idx.files[path] = sf

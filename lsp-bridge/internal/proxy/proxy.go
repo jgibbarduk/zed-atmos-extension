@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/lsp"
 )
@@ -23,6 +24,9 @@ type Proxy struct {
 	stdout    io.ReadCloser
 	stdoutBuf *bufio.Reader
 	mu        sync.Mutex
+	// stdoutMu protects all writes to the client stdout to prevent
+	// interleaving of Content-Length headers and bodies between goroutines.
+	stdoutMu sync.Mutex
 }
 
 func New(atmosPath string) (*Proxy, error) {
@@ -39,6 +43,8 @@ func New(atmosPath string) (*Proxy, error) {
 	}
 
 	if err := cmd.Start(); err != nil {
+		stdin.Close()
+		stdout.Close()
 		return nil, fmt.Errorf("start atmos lsp: %w", err)
 	}
 
@@ -111,7 +117,7 @@ func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
 		}()
 		for notif := range handler.Notifications() {
 			log.Printf("proxy: forwarding async notification (%d bytes)", len(notif))
-			if err := lsp.WriteMessage(stdout, notif); err != nil {
+			if err := p.writeClient(stdout, notif); err != nil {
 				log.Printf("write async notification: %v", err)
 			}
 		}
@@ -146,7 +152,7 @@ func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
 			response = handledResp
 			for i, notif := range notifications {
 				log.Printf("proxy: sending notification %d (%d bytes)", i, len(notif))
-				if err := lsp.WriteMessage(stdout, notif); err != nil {
+				if err := p.writeClient(stdout, notif); err != nil {
 					log.Printf("write notification: %v", err)
 				}
 			}
@@ -159,7 +165,7 @@ func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
 			}
 			for i, notif := range downstreamNotifs {
 				log.Printf("proxy: forwarding downstream notification %d (%d bytes)", i, len(notif))
-				if werr := lsp.WriteMessage(stdout, notif); werr != nil {
+				if werr := p.writeClient(stdout, notif); werr != nil {
 					log.Printf("write downstream notification: %v", werr)
 				}
 			}
@@ -167,19 +173,31 @@ func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
 
 		if response != nil {
 			log.Printf("proxy: sending response (%d bytes)", len(response))
-			if err := lsp.WriteMessage(stdout, response); err != nil {
+			if err := p.writeClient(stdout, response); err != nil {
 				return fmt.Errorf("write stdout: %w", err)
 			}
 		}
 	}
 }
 
+func (p *Proxy) writeClient(stdout io.Writer, content []byte) error {
+	p.stdoutMu.Lock()
+	defer p.stdoutMu.Unlock()
+	return lsp.WriteMessage(stdout, content)
+}
+
 func (p *Proxy) Close() error {
 	if p.stdin != nil {
 		p.stdin.Close()
 	}
-	if p.cmd != nil {
-		return p.cmd.Wait()
+	if p.cmd != nil && p.cmd.Process != nil {
+		done := make(chan error, 1)
+		go func() { done <- p.cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = p.cmd.Process.Kill()
+		}
 	}
 	return nil
 }

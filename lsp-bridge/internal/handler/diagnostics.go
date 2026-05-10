@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
@@ -17,6 +18,15 @@ var componentNamePattern = regexp.MustCompile(`^[/a-zA-Z0-9-_{}. ]+$`)
 var validBackendTypes = map[string]bool{
 	"local": true, "s3": true, "remote": true, "vault": true,
 	"static": true, "azurerm": true, "gcs": true, "cloud": true,
+}
+
+func validBackendTypeList() []string {
+	var list []string
+	for k := range validBackendTypes {
+		list = append(list, k)
+	}
+	sort.Strings(list)
+	return list
 }
 
 type diagnostic struct {
@@ -33,75 +43,116 @@ const (
 	SeverityError   = 1
 )
 
+// Checker is a function that inspects a StackFile and returns diagnostics.
+type Checker func(file *index.StackFile, dir string, idx *index.Index) []diagnostic
+
+// checkers is the ordered list of all diagnostic rules.
+var checkers = []Checker{
+	checkParseError,
+	checkDefaultsAncestor,
+	checkEmptyImports,
+	checkDuplicateComponents,
+	checkComponentNamePattern,
+	checkMetadataType,
+	checkMetadataComponentDir,
+	checkMetadataInherits,
+	checkBackendTypeEnum,
+	checkSettingsDependsOn,
+	checkUnresolvableImports,
+	checkImportOrder,
+	checkUnquotedVersion,
+	checkCatalogDirectory,
+	checkAbstractInheritors,
+	checkDependenciesComponents,
+	checkTerraformStateDeps,
+	checkUnknownTemplateVars,
+	checkDuplicateImports,
+	checkCircularImports,
+}
+
 func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
 	var diags []diagnostic
+	for _, checker := range checkers {
+		diags = append(diags, checker(file, dir, idx)...)
+	}
+	return diags
+}
+
+func checkParseError(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	if file.ParseError == "" {
+		return nil
+	}
+	var lineNum int
+	var msg string
+	if n, _ := fmt.Sscanf(file.ParseError, "yaml: line %d:", &lineNum); n == 1 {
+		msg = fmt.Sprintf("YAML syntax error: %s", file.ParseError)
+		lineNum--
+		if lineNum < 0 {
+			lineNum = 0
+		}
+	} else {
+		msg = fmt.Sprintf("YAML syntax error: %s", file.ParseError)
+	}
+	line := uint32(lineNum)
+	return []diagnostic{{
+		Severity: SeverityError,
+		Message:  msg,
+		Range:    toLSPRange(index.Range{StartLine: line, StartChar: 0, EndLine: line, EndChar: 0}),
+		Source:   "atmos-yaml",
+	}}
+}
+
+func checkDefaultsAncestor(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
 	filename := filepath.Base(file.Path)
-
-	// Check 0: YAML parse error
-	if file.ParseError != "" {
-		// Try to extract line number from error like "yaml: line 30: found unexpected end of stream"
-		var lineNum int
-		var msg string
-		if n, _ := fmt.Sscanf(file.ParseError, "yaml: line %d:", &lineNum); n == 1 {
-			msg = fmt.Sprintf("YAML syntax error: %s", file.ParseError)
-			lineNum-- // convert to 0-based
-			if lineNum < 0 {
-				lineNum = 0
-			}
-		} else {
-			msg = fmt.Sprintf("YAML syntax error: %s", file.ParseError)
-		}
-		line := uint32(lineNum)
-		diags = append(diags, diagnostic{
-			Severity: SeverityError,
-			Message:  msg,
-			Range:    toLSPRange(index.Range{StartLine: line, StartChar: 0, EndLine: line, EndChar: 0}),
-			Source:   "atmos-yaml",
-		})
-	}
-
-	// Check 1: No _defaults.yaml ancestor
 	defaultsPath := filepath.Join(dir, "_defaults.yaml")
-	if idx.GetFileUnsafe(defaultsPath) == nil && filename != "_defaults.yaml" {
-		parentDir := filepath.Dir(dir)
-		parentDefaults := filepath.Join(parentDir, "_defaults.yaml")
-		if idx.GetFileUnsafe(parentDefaults) == nil {
-			diags = append(diags, diagnostic{
-				Severity: SeverityHint,
-				Message:  "Consider adding a `_defaults.yaml` at this level for shared settings",
-				Range:    toLSPRange(index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}),
-				Source:   "atmos-best-practice",
-			})
-		}
+	if idx.GetFileUnsafe(defaultsPath) != nil || filename == "_defaults.yaml" {
+		return nil
 	}
-
-	// Check 2: Empty import array
-	if len(file.Imports) == 0 {
-		diags = append(diags, diagnostic{
-			Severity: SeverityHint,
-			Message:  "No imports defined — consider importing base settings",
-			Range:    toLSPRange(index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}),
-			Source:   "atmos-best-practice",
-		})
+	parentDir := filepath.Dir(dir)
+	parentDefaults := filepath.Join(parentDir, "_defaults.yaml")
+	if idx.GetFileUnsafe(parentDefaults) != nil {
+		return nil
 	}
+	return []diagnostic{{
+		Severity: SeverityHint,
+		Message:  "Consider adding a `_defaults.yaml` at this level for shared settings",
+		Range:    toLSPRange(index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}),
+		Source:   "atmos-best-practice",
+	}}
+}
 
-	// Check 3: Duplicate component names in the same file
-	compSeen := make(map[string]index.CompNode)
+func checkEmptyImports(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	if len(file.Imports) > 0 {
+		return nil
+	}
+	return []diagnostic{{
+		Severity: SeverityHint,
+		Message:  "No imports defined — consider importing base settings",
+		Range:    toLSPRange(index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}),
+		Source:   "atmos-best-practice",
+	}}
+}
+
+func checkDuplicateComponents(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
+	seen := make(map[string]bool)
 	for _, comp := range file.Comps {
-		if prev, ok := compSeen[comp.Name]; ok {
+		if seen[comp.Name] {
 			diags = append(diags, diagnostic{
 				Severity: SeverityError,
 				Message:  fmt.Sprintf("Duplicate component name '%s' in this file", comp.Name),
 				Range:    toLSPRange(comp.Range),
 				Source:   "atmos-component",
 			})
-			_ = prev
 		} else {
-			compSeen[comp.Name] = comp
+			seen[comp.Name] = true
 		}
 	}
+	return diags
+}
 
-	// Check 4: Component name must match Atmos pattern
+func checkComponentNamePattern(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, comp := range file.Comps {
 		if !componentNamePattern.MatchString(comp.Name) {
 			diags = append(diags, diagnostic{
@@ -112,8 +163,11 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			})
 		}
 	}
+	return diags
+}
 
-	// Check 5: Metadata.type must be "abstract" or "real"
+func checkMetadataType(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, meta := range file.Metadata {
 		if meta.Type != "" && meta.Type != "abstract" && meta.Type != "real" {
 			diags = append(diags, diagnostic{
@@ -124,8 +178,11 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			})
 		}
 	}
+	return diags
+}
 
-	// Check 5a: metadata.component directory existence
+func checkMetadataComponentDir(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, meta := range file.Metadata {
 		if meta.Component != "" {
 			compDir := filepath.Join(idx.BasePath(), "components", meta.Component)
@@ -139,8 +196,11 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			}
 		}
 	}
+	return diags
+}
 
-	// Check 5b: metadata.inherits component existence
+func checkMetadataInherits(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, meta := range file.Metadata {
 		if meta.Inherits != "" {
 			refs := idx.FindComponent(meta.Inherits)
@@ -154,21 +214,26 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			}
 		}
 	}
+	return diags
+}
 
-	// Check 6: Backend type enum validation
+func checkBackendTypeEnum(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, bt := range file.BackendTypes {
 		if !validBackendTypes[bt.Type] {
-			kind := bt.Kind
 			diags = append(diags, diagnostic{
 				Severity: SeverityError,
-				Message:  fmt.Sprintf("Invalid %s '%s' (must be one of: local, s3, remote, vault, static, azurerm, gcs, cloud)", kind, bt.Type),
+				Message:  fmt.Sprintf("Invalid %s '%s' (must be one of: %s)", bt.Kind, bt.Type, strings.Join(validBackendTypeList(), ", ")),
 				Range:    toLSPRange(bt.Range),
 				Source:   "atmos-schema",
 			})
 		}
 	}
+	return diags
+}
 
-	// Check 7: settings.depends_on component existence
+func checkSettingsDependsOn(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, sd := range file.SettingsDeps {
 		if sd.Component == "" {
 			continue
@@ -183,8 +248,11 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			})
 		}
 	}
+	return diags
+}
 
-	// Check 8: Unresolvable imports
+func checkUnresolvableImports(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, imp := range file.Imports {
 		resolved := idx.ResolveImport(imp.RawPath, dir)
 		if len(resolved) == 0 {
@@ -199,23 +267,29 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			log.Printf("diagnostics: import '%s' resolved to %v", imp.RawPath, resolved)
 		}
 	}
+	return diags
+}
 
-	// Check 9: Import order — check for overrides imported before base
-	if len(file.Imports) > 1 {
-		for i, imp := range file.Imports {
-			resolvedPath := imp.RawPath
-			if strings.Contains(resolvedPath, "override") && i == 0 {
-				diags = append(diags, diagnostic{
-					Severity: SeverityHint,
-					Message:  "Base imports should come first; later imports override earlier",
-					Range:    toLSPRange(imp.Range),
-					Source:   "atmos-best-practice",
-				})
-			}
+func checkImportOrder(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	if len(file.Imports) <= 1 {
+		return nil
+	}
+	var diags []diagnostic
+	for i, imp := range file.Imports {
+		if strings.Contains(imp.RawPath, "override") && i == 0 {
+			diags = append(diags, diagnostic{
+				Severity: SeverityHint,
+				Message:  "Base imports should come first; later imports override earlier",
+				Range:    toLSPRange(imp.Range),
+				Source:   "atmos-best-practice",
+			})
 		}
 	}
+	return diags
+}
 
-	// Check 10: Unquoted version values
+func checkUnquotedVersion(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, v := range file.Vars {
 		if strings.Contains(strings.ToLower(v.Key), "version") && !v.IsQuoted {
 			diags = append(diags, diagnostic{
@@ -226,20 +300,27 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			})
 		}
 	}
+	return diags
+}
 
-	// Check 11: Component not in catalog directory
-	for _, comp := range file.Comps {
-		if !strings.Contains(dir, "catalog") {
-			diags = append(diags, diagnostic{
-				Severity: SeverityHint,
-				Message:  "Consider using a catalog (" + filepath.Join(idx.BasePath(), "catalog") + ") for reusable component blueprints",
-				Range:    toLSPRange(comp.Range),
-				Source:   "atmos-best-practice",
-			})
-		}
+func checkCatalogDirectory(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	if filepath.Base(dir) == "catalog" || strings.HasSuffix(filepath.Base(dir), "-catalog") {
+		return nil
 	}
+	var diags []diagnostic
+	for _, comp := range file.Comps {
+		diags = append(diags, diagnostic{
+			Severity: SeverityHint,
+			Message:  "Consider using a catalog (" + filepath.Join(idx.BasePath(), "catalog") + ") for reusable component blueprints",
+			Range:    toLSPRange(comp.Range),
+			Source:   "atmos-best-practice",
+		})
+	}
+	return diags
+}
 
-	// Check 12: Abstract component deployability warning
+func checkAbstractInheritors(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, meta := range file.Metadata {
 		if meta.Type == "abstract" && meta.Component != "" {
 			inheritors := idx.FindInheritors(meta.Component)
@@ -253,8 +334,11 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			}
 		}
 	}
+	return diags
+}
 
-	// Check 13: Validate dependencies.components
+func checkDependenciesComponents(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, dep := range file.Deps {
 		if dep.Component == "" {
 			continue
@@ -269,8 +353,11 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			})
 		}
 	}
+	return diags
+}
 
-	// Check 14: Validate !terraform.state references match declared dependencies
+func checkTerraformStateDeps(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
 	for _, ts := range file.TerraformState {
 		if ts.Component == "" {
 			continue
@@ -299,9 +386,12 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			})
 		}
 	}
+	return diags
+}
 
-	// Check 15: Unknown template variables in template expressions
+func checkUnknownTemplateVars(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
 	vars := collectVars(file, idx)
+	var diags []diagnostic
 	for _, v := range file.Vars {
 		if !strings.Contains(v.Value, "{{") || !strings.Contains(v.Value, "}}") {
 			continue
@@ -345,38 +435,41 @@ func runBestPracticeChecks(file *index.StackFile, dir string, idx *index.Index) 
 			}
 		}
 	}
+	return diags
+}
 
-	// Check 16: Duplicate imports
-	importSeen := make(map[string]index.ImportNode)
+func checkDuplicateImports(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
+	var diags []diagnostic
+	seen := make(map[string]bool)
 	for _, imp := range file.Imports {
-		if prev, ok := importSeen[imp.RawPath]; ok {
+		if seen[imp.RawPath] {
 			diags = append(diags, diagnostic{
 				Severity: SeverityWarning,
 				Message:  fmt.Sprintf("Duplicate import '%s'", imp.RawPath),
 				Range:    toLSPRange(imp.Range),
 				Source:   "atmos-import",
 			})
-			_ = prev
 		} else {
-			importSeen[imp.RawPath] = imp
+			seen[imp.RawPath] = true
 		}
 	}
+	return diags
+}
 
-	// Check 11: Circular imports
+func checkCircularImports(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
 	if found, deep := hasCircularImport(file.Path, idx, nil, 0); found {
 		msg := "Circular import detected in this stack file"
 		if deep {
 			msg = "Import chain exceeds maximum depth (50); verify there are no circular imports"
 		}
-		diags = append(diags, diagnostic{
+		return []diagnostic{{
 			Severity: SeverityError,
 			Message:  msg,
 			Range:    toLSPRange(index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}),
 			Source:   "atmos-import",
-		})
+		}}
 	}
-
-	return diags
+	return nil
 }
 
 const maxImportDepth = 50
