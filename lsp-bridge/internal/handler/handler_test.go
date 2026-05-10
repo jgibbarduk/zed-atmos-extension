@@ -1224,19 +1224,23 @@ func TestExtractTemplatePartial_ClosingBrace(t *testing.T) {
 func TestFindPathCompletions_ExistingDir(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "catalog", "vpc"), 0755)
+	os.MkdirAll(filepath.Join(dir, "catalog", "vpc", "subnets"), 0755)
 	os.WriteFile(filepath.Join(dir, "catalog", "vpc", "main.yaml"), []byte(""), 0644)
 	os.WriteFile(filepath.Join(dir, "catalog", "vpc", "vars.yaml"), []byte(""), 0644)
 
-	items := findPathCompletions(dir, "catalog/vpc", lsp.Range{})
+	items, hasDirs := findPathCompletions(dir, "catalog/vpc", lsp.Range{})
 	if len(items) == 0 {
 		t.Fatal("expected completions for existing directory, got none")
+	}
+	if !hasDirs {
+		t.Fatal("expected hasDirs=true for directory with subdirectories")
 	}
 	var labels []string
 	for _, it := range items {
 		labels = append(labels, it["label"].(string))
 	}
-	if len(labels) != 2 {
-		t.Fatalf("expected 2 completions, got %d: %v", len(labels), labels)
+	if len(labels) != 3 {
+		t.Fatalf("expected 3 completions, got %d: %v", len(labels), labels)
 	}
 }
 

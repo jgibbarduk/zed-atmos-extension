@@ -800,13 +800,15 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 	}
 
 	// Walk the base path and find matching .yaml files.
-	items := findPathCompletions(basePath, partial, replaceRange)
+	items, hasDirs := findPathCompletions(basePath, partial, replaceRange)
 	if len(items) == 0 {
 		return true, emptyResult(content, req.ID), nil, nil
 	}
 
+	// isIncomplete should be true when directories are present so the
+	// client keeps re-triggering as the user navigates deeper.
 	result := map[string]interface{}{
-		"isIncomplete": len(items) > 20,
+		"isIncomplete": len(items) > 20 || hasDirs,
 		"items":        items,
 	}
 	b, err := buildResponse(req.ID, result)
@@ -1044,22 +1046,25 @@ func findDependencyComponentCompletions(idx *index.Index, partial string, replac
 }
 
 // findPathCompletions walks the stacks directory and returns matching paths.
-func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map[string]interface{} {
+// The second return value is true if any returned item is a directory,
+// signaling that the completion list may continue deeper.
+func findPathCompletions(basePath, partial string, replaceRange lsp.Range) ([]map[string]interface{}, bool) {
 	var items []map[string]interface{}
+	var hasDirs bool
 	// If the user typed "catalog/", look inside basePath/catalog/.
 	// If they typed "mixins/region/", look inside basePath/mixins/region/.
 	searchDir := filepath.Join(basePath, partial)
 	// Prevent directory traversal: ensure resolved path is within basePath.
 	cleanSearch, err := filepath.Abs(searchDir)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	cleanBase, err := filepath.Abs(basePath)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	if cleanSearch != cleanBase && !strings.HasPrefix(cleanSearch, cleanBase+string(filepath.Separator)) {
-		return nil
+		return nil, false
 	}
 	info, err := os.Stat(searchDir)
 	partialIsDir := err == nil && info.IsDir()
@@ -1068,17 +1073,17 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 		searchDir = filepath.Join(basePath, filepath.Dir(partial))
 		cleanSearch, _ = filepath.Abs(searchDir)
 		if cleanSearch != cleanBase && !strings.HasPrefix(cleanSearch, cleanBase+string(filepath.Separator)) {
-			return nil
+			return nil, false
 		}
 		info, err = os.Stat(searchDir)
 		if err != nil || !info.IsDir() {
-			return nil
+			return nil, false
 		}
 	}
 
 	entries, err := os.ReadDir(searchDir)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 
 	prefix := ""
@@ -1109,6 +1114,7 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 
 		// Only show directories and yaml files.
 		if entry.IsDir() {
+			hasDirs = true
 			items = append(items, map[string]interface{}{
 				"label":  label + "/",
 				"kind":   completionItemFolder,
@@ -1130,7 +1136,7 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) []map
 			})
 		}
 	}
-	return items
+	return items, hasDirs
 }
 
 // hoverBuilder assembles structured markdown hover content.
