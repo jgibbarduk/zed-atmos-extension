@@ -1555,6 +1555,16 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 			sf := index.ParseYAMLContent(path, []byte(text))
 			if sf != nil {
 				log.Printf("diagnostics: didChange parsed %d imports: %v", len(sf.Imports), importPaths(sf.Imports))
+				// When the user is typing incomplete YAML (e.g. inside a template
+				// expression), parsing fails and returns an empty StackFile. Preserve
+				// the previously parsed data so completions still work.
+				if sf.ParseError != "" {
+					old := h.idx.GetFile(path)
+					if old != nil {
+						old.ParseError = sf.ParseError
+						sf = old
+					}
+				}
 			} else {
 				log.Printf("diagnostics: didChange ParseYAMLContent returned nil")
 			}

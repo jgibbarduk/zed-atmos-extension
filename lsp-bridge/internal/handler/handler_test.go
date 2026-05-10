@@ -1267,6 +1267,57 @@ func TestDocumentContent_DidClose(t *testing.T) {
 	}
 }
 
+func TestDidChange_PreservesDataOnParseError(t *testing.T) {
+	idx, _ := index.New(t.TempDir())
+	h := New(idx, &mockDownstream{})
+	uri := "file:///test.yaml"
+	path := strings.TrimPrefix(uri, "file://")
+
+	// Initial valid content with a variable
+	validContent := "vars:\n  namespace: dev\n"
+	openContent := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/didOpen",
+		"params": map[string]interface{}{
+			"textDocument": map[string]interface{}{
+				"uri":  uri,
+				"text": validContent,
+			},
+		},
+	})
+	h.HandleMethod("textDocument/didOpen", openContent)
+
+	// Verify variable exists after didOpen
+	sf := idx.GetFile(path)
+	if sf == nil || len(sf.Vars) != 1 || sf.Vars[0].Key != "namespace" {
+		t.Fatalf("expected namespace var after didOpen, got: %+v", sf)
+	}
+
+	// Now send malformed YAML (incomplete template expression)
+	malformedContent := "vars:\n  namespace: {{ .vars."
+	changeContent := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/didChange",
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": uri},
+			"contentChanges": []map[string]string{{"text": malformedContent}},
+		},
+	})
+	h.HandleMethod("textDocument/didChange", changeContent)
+
+	// Verify the old var data is preserved and ParseError is set
+	sf = idx.GetFile(path)
+	if sf == nil {
+		t.Fatal("expected file in index after didChange")
+	}
+	if sf.ParseError == "" {
+		t.Fatal("expected ParseError after malformed YAML")
+	}
+	if len(sf.Vars) != 1 || sf.Vars[0].Key != "namespace" {
+		t.Fatalf("expected old vars preserved on parse error, got: %+v", sf.Vars)
+	}
+}
+
 func TestHandleInitialize(t *testing.T) {
 	downstreamResp := mustMarshal(t, map[string]interface{}{
 		"jsonrpc": "2.0",
