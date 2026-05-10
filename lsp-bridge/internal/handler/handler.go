@@ -1121,7 +1121,12 @@ func findPathCompletions(basePath, partial string, replaceRange lsp.Range) ([]ma
 				"detail": "Directory",
 				"textEdit": map[string]interface{}{
 					"range":   replaceRange,
-					"newText": label + "/",
+					"newText": label,
+				},
+				"commitCharacters": []string{"/"},
+				"command": map[string]interface{}{
+					"title":   "Trigger Suggest",
+					"command": "editor.action.triggerSuggest",
 				},
 			})
 		} else if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
