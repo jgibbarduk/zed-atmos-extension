@@ -113,3 +113,42 @@ func TestCheckMetadataComponentDir_Skipped(t *testing.T) {
 		t.Fatalf("expected no diagnostics for metadata.component (definition), got: %+v", diags)
 	}
 }
+
+func TestCheckUnquotedVersion(t *testing.T) {
+	idx, _ := index.New("")
+
+	cases := []struct {
+		name     string
+		key      string
+		value    string
+		isQuoted bool
+		wantDiag bool
+	}{
+		{"numeric float triggers warning", "version", "1.10", false, true},
+		{"numeric int triggers warning", "api_version", "2", false, true},
+		{"boolean false is skipped", "versioning_enabled", "false", false, false},
+		{"boolean true is skipped", "versioning_enabled", "true", false, false},
+		{"null is skipped", "version", "null", false, false},
+		{"semantic version string is skipped", "version", "1.0.0", false, false},
+		{"quoted value is skipped", "version", "1.10", true, false},
+		{"non-version key is skipped", "namespace", "1.10", false, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sf := &index.StackFile{
+				Path: "/test.yaml",
+				Vars: []index.VarNode{
+					{Key: tc.key, Value: tc.value, IsQuoted: tc.isQuoted, Range: index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0}},
+				},
+			}
+			diags := checkUnquotedVersion(sf, "/", idx)
+			if tc.wantDiag && len(diags) == 0 {
+				t.Fatal("expected diagnostic, got none")
+			}
+			if !tc.wantDiag && len(diags) > 0 {
+				t.Fatalf("expected no diagnostic, got: %+v", diags)
+			}
+		})
+	}
+}
