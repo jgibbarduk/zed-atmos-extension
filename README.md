@@ -9,7 +9,8 @@ A [Zed](https://zed.dev) editor extension for [Atmos](https://atmos.tools) stack
 - **Template resolution** — `{{ .vars.namespace }}`, `{{ .atmos_component }}`, and other template expressions are resolved in hover tooltips
 - **Rename** — Rename component references across the entire workspace
 - **Code actions** — Generate component scaffolds for missing components
-- **Diagnostics** — Warnings for unresolvable imports, missing component references, unquoted versions, and abstract components with no inheritors
+- **Completion** — Suggest known component names inside `dependencies.components`, `settings.depends_on`, and `terraform.state`; suggest template variables inside `{{ ... }}`; suggest paths for imports and `metadata.component`
+- **Diagnostics** — 20+ checks including unresolvable imports, duplicate components, missing dependency references, unquoted versions, circular imports, invalid backend types, and abstract components with no inheritors
 
 ## Installation
 
