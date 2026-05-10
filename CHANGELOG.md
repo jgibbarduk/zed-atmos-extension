@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/jgibbarduk/zed-atmos-extension/compare/v0.3.0...v0.3.1) (2026-05-10)
+
+
+### Bug Fixes
+
+* update extension.toml version to 0.3.0 to match Cargo.toml ([#8](https://github.com/jgibbarduk/zed-atmos-extension/issues/8)) ([9c18456](https://github.com/jgibbarduk/zed-atmos-extension/commit/9c1845651ce307409f36bd9482560f236768f2fd))
+
 ## [0.3.0](https://github.com/jgibbarduk/zed-atmos-extension/compare/v0.2.1...v0.3.0) (2026-05-10)
 
 
