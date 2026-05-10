@@ -190,6 +190,11 @@ func (idx *Index) StartWatching(onChange func()) error {
 			return nil
 		}
 		if d.IsDir() {
+			// Skip hidden directories (.git, .zed, node_modules, etc.) to avoid
+			// exhausting OS watcher limits on large repositories.
+			if name := filepath.Base(path); strings.HasPrefix(name, ".") {
+				return fs.SkipDir
+			}
 			return w.Add(path)
 		}
 		return nil
@@ -556,5 +561,6 @@ func (idx *Index) AllFiles() []*StackFile {
 func (idx *Index) Close() {
 	if idx.watcher != nil {
 		idx.watcher.Close()
+		idx.watcher = nil
 	}
 }

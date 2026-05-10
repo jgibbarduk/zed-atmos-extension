@@ -184,13 +184,20 @@ func checkMetadataType(file *index.StackFile, dir string, idx *index.Index) []di
 func checkMetadataComponentDir(file *index.StackFile, dir string, idx *index.Index) []diagnostic {
 	var diags []diagnostic
 	componentsBase := filepath.Join(idx.BasePath(), "components")
+	cleanBase, baseErr := filepath.Abs(componentsBase)
+	if baseErr != nil {
+		return diags
+	}
 	for _, meta := range file.Metadata {
 		if meta.Component == "" {
 			continue
 		}
 		compDir := filepath.Join(componentsBase, meta.Component)
-		cleanComp, _ := filepath.Abs(compDir)
-		cleanBase, _ := filepath.Abs(componentsBase)
+		cleanComp, compErr := filepath.Abs(compDir)
+		if compErr != nil {
+			log.Printf("checkMetadataComponentDir: filepath.Abs(%s) failed: %v", compDir, compErr)
+			continue
+		}
 		if cleanComp != cleanBase && !strings.HasPrefix(cleanComp, cleanBase+string(filepath.Separator)) {
 			diags = append(diags, diagnostic{
 				Severity: SeverityError,

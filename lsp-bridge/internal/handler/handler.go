@@ -68,6 +68,7 @@ type LSPHandler struct {
 	diagPendingPath  string
 	closed           atomic.Bool
 	closeMu          sync.Mutex
+	closeOnce        sync.Once
 }
 
 func New(idx *index.Index, downstream downstreamCaller) *LSPHandler {
@@ -96,9 +97,9 @@ func (h *LSPHandler) Close() {
 		h.diagTimer.Stop()
 	}
 	h.diagMu.Unlock()
-	h.closeMu.Lock()
-	defer h.closeMu.Unlock()
-	close(h.notificationsCh)
+	h.closeOnce.Do(func() {
+		close(h.notificationsCh)
+	})
 }
 
 func (h *LSPHandler) HandleMethod(method string, content []byte) (bool, []byte, [][]byte, error) {
@@ -189,9 +190,6 @@ func (h *LSPHandler) handleInitialize(content []byte) (bool, []byte, [][]byte, e
 	}
 	if initOpts.InitializationOptions.DiagnosticsEnabled != nil {
 		cfg.DiagnosticsEnabled = initOpts.InitializationOptions.DiagnosticsEnabled
-	}
-	if initOpts.InitializationOptions.AtmosCLIPath != "" {
-		cfg.AtmosCLIPath = initOpts.InitializationOptions.AtmosCLIPath
 	}
 	if initOpts.InitializationOptions.LogLevel != "" {
 		cfg.LogLevel = initOpts.InitializationOptions.LogLevel
