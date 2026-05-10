@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -126,7 +127,7 @@ func (p *Proxy) Run(stdin io.Reader, stdout io.Writer, handler Handler) error {
 	for {
 		msg, err := lsp.ReadMessage(reader)
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				log.Printf("proxy: stdin EOF, shutting down")
 				handler.Close()
 				return nil

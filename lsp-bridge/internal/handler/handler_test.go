@@ -17,6 +17,16 @@ type mockDownstream struct{}
 func (m *mockDownstream) CallDownstream(content []byte) ([]byte, [][]byte, error) { return nil, nil, nil }
 func (m *mockDownstream) SendNotification(content []byte) error         { return nil }
 
+// mockDownstreamWithResponse returns a predefined JSON-RPC response.
+type mockDownstreamWithResponse struct {
+	mockDownstream
+	response []byte
+}
+
+func (m *mockDownstreamWithResponse) CallDownstream(content []byte) ([]byte, [][]byte, error) {
+	return m.response, nil, nil
+}
+
 func extractResult(resp []byte, v interface{}) {
 	var wrapper map[string]json.RawMessage
 	json.Unmarshal(resp, &wrapper)
@@ -1253,5 +1263,378 @@ func TestDocumentContent_DidClose(t *testing.T) {
 	}
 	if _, ok := h.documentContent[path]; ok {
 		t.Fatal("expected documentContent to be deleted after didClose")
+	}
+}
+
+func TestHandleInitialize(t *testing.T) {
+	downstreamResp := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"result": map[string]interface{}{
+			"capabilities": map[string]interface{}{
+				"documentFormattingProvider": true,
+			},
+		},
+	})
+	md := &mockDownstreamWithResponse{response: downstreamResp}
+
+	dir := t.TempDir()
+	idx, _ := index.New(dir)
+	h := New(idx, md)
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"rootPath": dir,
+			"initializationOptions": map[string]interface{}{
+				"stacksPath":         "",
+				"diagnosticsEnabled": true,
+				"atmosCLIPath":       "",
+				"logLevel":           "debug",
+			},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("initialize", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	caps := result["capabilities"].(map[string]interface{})
+	if caps["definitionProvider"] != true {
+		t.Fatal("expected bridge definitionProvider capability")
+	}
+	if caps["documentFormattingProvider"] != true {
+		t.Fatal("expected downstream documentFormattingProvider capability merged")
+	}
+}
+
+func TestHandleShutdown(t *testing.T) {
+	dir := t.TempDir()
+	idx, _ := index.New(dir)
+	h := New(idx, &mockDownstream{})
+	h.initialized.Store(true)
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+	})
+
+	handled, resp, _, err := h.HandleMethod("shutdown", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if h.initialized.Load() {
+		t.Fatal("expected initialized to be false after shutdown")
+	}
+	var result interface{}
+	json.Unmarshal(resp, &result)
+	if result == nil {
+		t.Fatal("expected non-nil response")
+	}
+}
+
+func TestHandleExit(t *testing.T) {
+	dir := t.TempDir()
+	idx, _ := index.New(dir)
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+	})
+
+	handled, resp, _, err := h.HandleMethod("exit", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	if resp != nil {
+		t.Fatal("expected nil response for exit")
+	}
+}
+
+func TestHandleCompletion_Template(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\ncomponents:\n  terraform:\n    database:\n      vars:\n        name: '{{ .vars.na }}'\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+	h.documentContent[stackPath] = []byte("vars:\n  namespace: dev\ncomponents:\n  terraform:\n    database:\n      vars:\n        name: '{{ .vars.na }}'\n")
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 6, "character": 25},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/completion", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	items := result["items"].([]interface{})
+	if len(items) == 0 {
+		t.Fatal("expected template completion items")
+	}
+}
+
+func TestHandleCompletion_Path(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "catalog", "vpc"), 0755)
+	os.WriteFile(filepath.Join(dir, "catalog", "vpc", "main.yaml"), []byte(""), 0644)
+
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("import:\n  - catalog/vpc/main\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+	h.documentContent[stackPath] = []byte("import:\n  - catalog/vpc/\n")
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 1, "character": 18},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/completion", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	items := result["items"].([]interface{})
+	if len(items) == 0 {
+		t.Fatal("expected path completion items")
+	}
+}
+
+func TestHandleReferences_Import(t *testing.T) {
+	dir := t.TempDir()
+	defaultsPath := filepath.Join(dir, "stacks/dev/defaults.yaml")
+	os.MkdirAll(filepath.Dir(defaultsPath), 0755)
+	os.WriteFile(defaultsPath, []byte("vars:\n  namespace: dev\n"), 0644)
+
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("import:\n  - defaults\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 1, "character": 4},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/references", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var locations []map[string]interface{}
+	extractResult(resp, &locations)
+	if len(locations) == 0 {
+		t.Fatal("expected at least one reference location for import")
+	}
+}
+
+func TestHandleReferences_Component(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    database:\n      vars:\n        size: large\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 2, "character": 4},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/references", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var locations []map[string]interface{}
+	extractResult(resp, &locations)
+	if len(locations) == 0 {
+		t.Fatal("expected at least one reference location for component")
+	}
+}
+
+func TestHandleDiagnostics_DidOpen(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/didOpen",
+		"params": map[string]interface{}{
+			"textDocument": map[string]interface{}{
+				"uri":  "file://" + stackPath,
+				"text": "vars:\n  namespace: staging\n",
+			},
+		},
+	})
+
+	handled, _, _, err := h.HandleMethod("textDocument/didOpen", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+
+	// Verify documentContent was updated
+	if doc, ok := h.documentContent[stackPath]; !ok || !strings.Contains(string(doc), "staging") {
+		t.Fatal("expected documentContent to be updated with didOpen text")
+	}
+}
+
+func TestHandleDiagnostics_DidChange(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/didChange",
+		"params": map[string]interface{}{
+			"textDocument": map[string]interface{}{"uri": "file://" + stackPath},
+			"contentChanges": []map[string]string{
+				{"text": "vars:\n  namespace: changed\n"},
+			},
+		},
+	})
+
+	handled, _, _, err := h.HandleMethod("textDocument/didChange", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+
+	// Verify documentContent was updated
+	if doc, ok := h.documentContent[stackPath]; !ok || !strings.Contains(string(doc), "changed") {
+		t.Fatal("expected documentContent to be updated with didChange text")
+	}
+}
+
+func TestHandleDiagnostics_DidSave(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks/dev/stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("vars:\n  namespace: dev\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+	h.documentContent[stackPath] = []byte("vars:\n  namespace: temp\n")
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "textDocument/didSave",
+		"params": map[string]interface{}{
+			"textDocument": map[string]interface{}{"uri": "file://" + stackPath},
+		},
+	})
+
+	handled, _, _, err := h.HandleMethod("textDocument/didSave", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+
+	// Verify documentContent was cleared
+	if _, ok := h.documentContent[stackPath]; ok {
+		t.Fatal("expected documentContent to be cleared after didSave")
 	}
 }
