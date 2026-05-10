@@ -703,27 +703,22 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 		return true, emptyResult(content, req.ID), nil, nil
 	}
 
-	// Read the current line to detect what the user is typing.
-	var lineText string
+	// Read document lines from memory or disk.
+	var lines []string
 	h.documentContentMu.RLock()
 	if docContent, ok := h.documentContent[path]; ok {
-		lines := normalizeLines(string(docContent))
-		if int(req.Params.Position.Line) < len(lines) {
-			lineText = lines[req.Params.Position.Line]
-		}
+		lines = normalizeLines(string(docContent))
 	}
 	h.documentContentMu.RUnlock()
-	if lineText == "" {
+	if lines == nil {
 		if contentBytes, err := os.ReadFile(path); err == nil {
-			lines := normalizeLines(string(contentBytes))
-			if int(req.Params.Position.Line) < len(lines) {
-				lineText = lines[req.Params.Position.Line]
-			}
+			lines = normalizeLines(string(contentBytes))
 		}
 	}
-	if lineText == "" {
+	if lines == nil || int(req.Params.Position.Line) >= len(lines) {
 		return true, emptyResult(content, req.ID), nil, nil
 	}
+	lineText := lines[req.Params.Position.Line]
 
 	// Check if the cursor is inside a Go template expression {{ ... }}.
 	if partial, startChar := extractTemplatePartial(lineText, int(req.Params.Position.Character)); partial != "" {
@@ -754,6 +749,29 @@ func (h *LSPHandler) handleCompletion(content []byte) (bool, []byte, [][]byte, e
 			End:   lsp.Position{Line: req.Params.Position.Line, Character: req.Params.Position.Character},
 		}
 		items := findComponentCompletions(basePath, partial, replaceRange)
+		if len(items) > 0 {
+			result := map[string]interface{}{
+				"isIncomplete": len(items) > 20,
+				"items":        items,
+			}
+			b, err := buildResponse(req.ID, result)
+			if err != nil {
+				return true, errorResponse(content, -32603, "Internal error"), nil, nil
+			}
+			return true, b, nil, nil
+		}
+	}
+
+	// Check if cursor is on a component reference inside dependencies or
+	// terraform.state — offer known component names.
+	if isComponentReferenceContext(lines, int(req.Params.Position.Line)) {
+		partial := extractPartialPath(lineText, int(req.Params.Position.Character))
+		partialStartChar := int(req.Params.Position.Character) - len(partial)
+		replaceRange := lsp.Range{
+			Start: lsp.Position{Line: req.Params.Position.Line, Character: uint32(partialStartChar)},
+			End:   lsp.Position{Line: req.Params.Position.Line, Character: req.Params.Position.Character},
+		}
+		items := findDependencyComponentCompletions(h.idx, partial, replaceRange)
 		if len(items) > 0 {
 			result := map[string]interface{}{
 				"isIncomplete": len(items) > 20,
@@ -959,6 +977,62 @@ func findComponentCompletions(basePath, partial string, replaceRange lsp.Range) 
 		items = append(items, map[string]interface{}{
 			"label":  name,
 			"kind":   completionItemFolder,
+			"detail": "Component",
+			"textEdit": map[string]interface{}{
+				"range":   replaceRange,
+				"newText": name,
+			},
+		})
+	}
+	return items
+}
+
+// isComponentReferenceContext returns true if the cursor is on a component
+// reference inside a dependencies or depends_on block.
+func isComponentReferenceContext(lines []string, lineIdx int) bool {
+	if lineIdx >= len(lines) {
+		return false
+	}
+	trimmed := strings.TrimSpace(lines[lineIdx])
+
+	// Must have "component:" as a key.
+	if !strings.Contains(trimmed, "component:") {
+		return false
+	}
+
+	// Look backward for dependency context markers.
+	for i := lineIdx - 1; i >= 0 && i >= lineIdx-30; i-- {
+		t := strings.TrimSpace(lines[i])
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "dependencies:") || strings.HasPrefix(t, "depends_on:") {
+			return true
+		}
+		if strings.HasPrefix(t, "metadata:") {
+			return false
+		}
+		// A top-level "components:" block means we're inside a component
+		// definition, not a dependency reference.
+		indent := len(lines[i]) - len(strings.TrimLeft(lines[i], " "))
+		if strings.HasPrefix(t, "components:") && indent <= 2 {
+			return false
+		}
+	}
+	return false
+}
+
+// findDependencyComponentCompletions suggests component names from the index.
+func findDependencyComponentCompletions(idx *index.Index, partial string, replaceRange lsp.Range) []map[string]interface{} {
+	names := idx.ComponentNames()
+	var items []map[string]interface{}
+	for _, name := range names {
+		if partial != "" && !strings.HasPrefix(name, partial) {
+			continue
+		}
+		items = append(items, map[string]interface{}{
+			"label":  name,
+			"kind":   completionItemVariable,
 			"detail": "Component",
 			"textEdit": map[string]interface{}{
 				"range":   replaceRange,
@@ -1495,13 +1569,12 @@ func (h *LSPHandler) handleDiagnostics(content []byte) (bool, []byte, [][]byte, 
 		h.documentContentMu.Lock()
 		delete(h.documentContent, path)
 		h.documentContentMu.Unlock()
-		// Forward to downstream before clearing diagnostics so atmos LSP
-		// knows the file was closed.
+		// Forward to downstream so atmos LSP knows the file was closed.
+		// Do NOT clear diagnostics here — they should remain visible in the
+		// file tree even when the file is not open in an editor.
 		if err := h.downstream.SendNotification(content); err != nil {
 			log.Printf("diagnostics: forward didClose to atmos failed: %v", err)
 		}
-		// Clear diagnostics for closed file.
-		h.publishDiagnostics(uri, []diagnostic{})
 		return true, nil, nil, nil
 	}
 

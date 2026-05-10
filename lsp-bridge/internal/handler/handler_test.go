@@ -1906,3 +1906,164 @@ func TestHandleHover_YAMLTag(t *testing.T) {
 		t.Fatalf("expected 'YAML function: !env' in hover, got: %s", value)
 	}
 }
+
+func TestIsComponentReferenceContext(t *testing.T) {
+	cases := []struct {
+		name     string
+		lines    []string
+		lineIdx  int
+		expected bool
+	}{
+		{
+			name: "dependencies.components list item",
+			lines: []string{
+				"components:",
+				"  terraform:",
+				"    api:",
+				"      dependencies:",
+				"        components:",
+				"          - component: database",
+				"          - component: cluster",
+				},
+			lineIdx:  5,
+			expected: true,
+		},
+		{
+			name: "terraform.state component ref — not detected (focus is dependencies)",
+			lines: []string{
+				"terraform:",
+				"  state:",
+				"    - component: database",
+				},
+			lineIdx:  2,
+			expected: false,
+		},
+		{
+			name: "metadata.component should be false",
+			lines: []string{
+				"metadata:",
+				"  component: vpc",
+				},
+			lineIdx:  1,
+			expected: false,
+		},
+		{
+			name: "component key without dependency context",
+			lines: []string{
+				"components:",
+				"  terraform:",
+				"    api:",
+				"      component: database",
+				},
+			lineIdx:  3,
+			expected: false,
+		},
+		{
+			name: "line without component key",
+			lines: []string{
+				"vars:",
+				"  namespace: dev",
+				},
+			lineIdx:  1,
+			expected: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isComponentReferenceContext(tc.lines, tc.lineIdx)
+			if got != tc.expected {
+				t.Fatalf("expected %v, got %v", tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestFindDependencyComponentCompletions(t *testing.T) {
+	dir := t.TempDir()
+	stackPath := filepath.Join(dir, "stacks", "dev", "stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    database:\n      vars: {}\n    cluster:\n      vars: {}\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+
+	replaceRange := lsp.Range{
+		Start: lsp.Position{Line: 0, Character: 0},
+		End:   lsp.Position{Line: 0, Character: 0},
+	}
+
+	items := findDependencyComponentCompletions(idx, "", replaceRange)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 completion items, got %d", len(items))
+	}
+	labels := []string{items[0]["label"].(string), items[1]["label"].(string)}
+	if labels[0] != "cluster" || labels[1] != "database" {
+		t.Fatalf("expected sorted labels [cluster, database], got %v", labels)
+	}
+
+	// Partial prefix filter
+	items = findDependencyComponentCompletions(idx, "db", replaceRange)
+	if len(items) != 0 {
+		t.Fatalf("expected 0 items for prefix 'db', got %d", len(items))
+	}
+
+	items = findDependencyComponentCompletions(idx, "dat", replaceRange)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item for prefix 'dat', got %d", len(items))
+	}
+	if items[0]["label"] != "database" {
+		t.Fatalf("expected label 'database', got %s", items[0]["label"])
+	}
+}
+
+func TestHandleCompletion_DependencyComponent(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a component definition
+	stackPath := filepath.Join(dir, "stacks", "dev", "stack.yaml")
+	os.MkdirAll(filepath.Dir(stackPath), 0755)
+	os.WriteFile(stackPath, []byte("components:\n  terraform:\n    database:\n      vars: {}\n"), 0644)
+
+	idx, err := index.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.SetBasePath(dir)
+	idx.Reindex()
+	h := New(idx, &mockDownstream{})
+
+	// Simulate document content with a dependency component reference
+	doc := "components:\n  terraform:\n    api:\n      dependencies:\n        components:\n          - component: dat"
+	h.documentContent[stackPath] = []byte(doc)
+
+	content := mustMarshal(t, map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"params": map[string]interface{}{
+			"textDocument": map[string]string{"uri": "file://" + stackPath},
+			"position":     map[string]uint32{"line": 5, "character": 24},
+		},
+	})
+
+	handled, resp, _, err := h.HandleMethod("textDocument/completion", content)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled")
+	}
+	var result map[string]interface{}
+	extractResult(resp, &result)
+	items := result["items"].([]interface{})
+	if len(items) == 0 {
+		t.Fatal("expected dependency component completion items")
+	}
+	if items[0].(map[string]interface{})["label"] != "database" {
+		t.Fatalf("expected label 'database', got %v", items[0].(map[string]interface{})["label"])
+	}
+}

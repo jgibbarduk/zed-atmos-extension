@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -556,6 +557,17 @@ func (idx *Index) AllFiles() []*StackFile {
 		result = append(result, deepCopyStackFile(f))
 	}
 	return result
+}
+
+func (idx *Index) ComponentNames() []string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	names := make([]string, 0, len(idx.byComponent))
+	for k := range idx.byComponent {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (idx *Index) Close() {
