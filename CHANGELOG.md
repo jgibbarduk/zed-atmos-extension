@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/jgibbarduk/zed-atmos-extension/compare/v0.2.0...v0.2.1) (2026-05-10)
+
+
+### Bug Fixes
+
+* **diagnostics:** skip unquoted version check for booleans and strings ([e760581](https://github.com/jgibbarduk/zed-atmos-extension/commit/e7605818f54e351d44daf78f330855dd11893b85))
+* **diagnostics:** skip unquoted version check for booleans and strings ([c0595a7](https://github.com/jgibbarduk/zed-atmos-extension/commit/c0595a7270261411ede1dde9c28266d8942dbd8d))
+
 ## [0.2.0](https://github.com/jgibbarduk/zed-atmos-extension/compare/v0.1.0...v0.2.0) (2026-05-10)
 
 
