@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.0](https://github.com/jgibbarduk/zed-atmos-extension/compare/v0.1.0...v0.2.0) (2026-05-10)
+
+
+### Features
+
+* **handler:** autocomplete dependency component names ([5d0b2a0](https://github.com/jgibbarduk/zed-atmos-extension/commit/5d0b2a0d08120b7032a797c0dbdfdd2c1ce2d636))
+* **handler:** structured markdown hover with headers, code blocks, and horizontal rules ([ea43c06](https://github.com/jgibbarduk/zed-atmos-extension/commit/ea43c06c1dcb2290f5b31935dc3ee985f52772b9))
+* implement 10 Atmos LSP improvements + review fixes ([94f59c7](https://github.com/jgibbarduk/zed-atmos-extension/commit/94f59c7ff82d03bbf37799f062601f9a2743881c))
+
+
+### Bug Fixes
+
+* address final code review blockers before publication ([b1121ec](https://github.com/jgibbarduk/zed-atmos-extension/commit/b1121ecd48ad5bb6a74daf3764aa6e75ed05f050))
+* **diagnostics:** skip all metadata.component checks ([60e2de1](https://github.com/jgibbarduk/zed-atmos-extension/commit/60e2de1ad17ceb89bdd6d412167c43373e515fe9))
+* **diagnostics:** skip metadata.component check for abstract components ([2cb7adc](https://github.com/jgibbarduk/zed-atmos-extension/commit/2cb7adcdb37cc988a68c6695f202ecab6250891f))
+* **handler:** add bullet markers inside yaml code blocks for vars sections ([c1a566e](https://github.com/jgibbarduk/zed-atmos-extension/commit/c1a566e1d8f43830a471bf319be9a4943496a475))
+* **handler:** add bullets back to kv, use yaml code blocks for vars sections ([ae0a374](https://github.com/jgibbarduk/zed-atmos-extension/commit/ae0a374f51e2325d0b2a414b0931116c2b4672c9))
+* **handler:** use bold keys + plain values in hover, remove inline code background ([aa34f15](https://github.com/jgibbarduk/zed-atmos-extension/commit/aa34f15edaef3e256e3139c7fdb98a301ec3205f))
+* resolve all medium/low code review issues before publish ([c568599](https://github.com/jgibbarduk/zed-atmos-extension/commit/c568599256de0e85f5e8b2b9f4723ab1fa6b7b98))
+
 ## 0.1.0 (2025-05-05)
 
 ### Features
