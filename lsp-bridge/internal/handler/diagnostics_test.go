@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/jgibbarduk/zed-atmos-extension/lsp-bridge/internal/index"
@@ -91,15 +90,17 @@ func TestDiagnostics_CircularImport_DeepChain(t *testing.T) {
 	}
 }
 
-func TestCheckMetadataComponentDir_AbstractSkipped(t *testing.T) {
+func TestCheckMetadataComponentDir_Skipped(t *testing.T) {
 	idx, _ := index.New("")
 	idx.SetBasePath("/project/stacks")
 
+	// metadata.component is always a definition, never a reference.
+	// All checks (path traversal + existence) should be skipped.
 	sf := &index.StackFile{
 		Path: "/project/stacks/catalog/dynamodb.yaml",
 		Metadata: []index.MetadataNode{
 			{
-				Component:      "dynamodb",
+				Component:      "../../../etc/passwd",
 				ComponentRange: index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0},
 				Type:           "abstract",
 				Range:          index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0},
@@ -109,33 +110,6 @@ func TestCheckMetadataComponentDir_AbstractSkipped(t *testing.T) {
 
 	diags := checkMetadataComponentDir(sf, filepath.Dir(sf.Path), idx)
 	if len(diags) > 0 {
-		t.Fatalf("expected no diagnostics for abstract component, got: %+v", diags)
-	}
-}
-
-func TestCheckMetadataComponentDir_RealChecked(t *testing.T) {
-	dir := t.TempDir()
-	idx, _ := index.New("")
-	idx.SetBasePath(dir)
-
-	// No components/dynamodb directory exists
-	sf := &index.StackFile{
-		Path: filepath.Join(dir, "stack.yaml"),
-		Metadata: []index.MetadataNode{
-			{
-				Component:      "dynamodb",
-				ComponentRange: index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0},
-				Type:           "real",
-				Range:          index.Range{StartLine: 0, StartChar: 0, EndLine: 0, EndChar: 0},
-			},
-		},
-	}
-
-	diags := checkMetadataComponentDir(sf, filepath.Dir(sf.Path), idx)
-	if len(diags) != 1 {
-		t.Fatalf("expected 1 diagnostic for missing real component dir, got %d", len(diags))
-	}
-	if !strings.Contains(diags[0].Message, "does not exist") {
-		t.Fatalf("expected 'does not exist' error, got: %s", diags[0].Message)
+		t.Fatalf("expected no diagnostics for metadata.component (definition), got: %+v", diags)
 	}
 }

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -8,14 +9,24 @@ import (
 )
 
 func TestImportResolution_CatalogAccountMap(t *testing.T) {
-	idx, _ := index.New("/Users/jamesgibbard/Development/atmos-test-project/stacks")
-	idx.SetBasePath("/Users/jamesgibbard/Development/atmos-test-project/stacks")
+	dir := t.TempDir()
+	stacksDir := filepath.Join(dir, "stacks")
+	catalogDir := filepath.Join(stacksDir, "catalog")
+	os.MkdirAll(catalogDir, 0755)
+	os.WriteFile(filepath.Join(catalogDir, "account-map.yaml"), []byte("vars:\n  account_id: '123456789'\n"), 0644)
+
+	stackDir := filepath.Join(stacksDir, "orgs", "ex1", "core", "root", "global-region")
+	os.MkdirAll(stackDir, 0755)
+	stackPath := filepath.Join(stackDir, "demo.yaml")
+	os.WriteFile(stackPath, []byte("import:\n  - catalog/account-map\n"), 0644)
+
+	idx, _ := index.New(stacksDir)
+	idx.SetBasePath(stacksDir)
 	idx.Reindex()
 
-	path := "/Users/jamesgibbard/Development/atmos-test-project/stacks/orgs/ex1/core/root/global-region/demo.yaml"
-	resolved := idx.ResolveImport("catalog/account-map", filepath.Dir(path))
+	resolved := idx.ResolveImport("catalog/account-map", filepath.Dir(stackPath))
 
-	t.Logf("Resolved imports for catalog/account-map from %s: %v", filepath.Dir(path), resolved)
+	t.Logf("Resolved imports for catalog/account-map from %s: %v", filepath.Dir(stackPath), resolved)
 
 	found := false
 	for _, r := range resolved {
